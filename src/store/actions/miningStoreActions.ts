@@ -181,9 +181,12 @@ export const handleAvailableMinersChanged = (miners: Partial<Record<GpuMinerType
 
 export const switchSelectedMiner = async (newGpuMiner: GpuMinerType) => {
     const oldMiner = useMiningStore.getState().selectedMiner;
-    if (oldMiner === newGpuMiner) return;
+    if (oldMiner === newGpuMiner || useMiningStore.getState().isSwitchingMiner) return;
 
-    useMiningStore.setState({ selectedMiner: newGpuMiner });
+    // Until the backend has switched, its selected miner is still the old one. Device ids are
+    // scoped per miner, so anything writing device settings in that window would write them
+    // against the wrong miner - the picker stays disabled for the duration.
+    useMiningStore.setState({ selectedMiner: newGpuMiner, isSwitchingMiner: true });
 
     const anyMiningInitiated =
         useMiningStore.getState().isCpuMiningInitiated || useMiningStore.getState().isGpuMiningInitiated;
@@ -203,6 +206,8 @@ export const switchSelectedMiner = async (newGpuMiner: GpuMinerType) => {
         useMiningStore.setState({ selectedMiner: oldMiner });
         console.error('Could not switch selected miner: ', e);
         setError(e as string);
+    } finally {
+        useMiningStore.setState({ isSwitchingMiner: false });
     }
 };
 

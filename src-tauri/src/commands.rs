@@ -1083,6 +1083,23 @@ pub async fn toggle_device_exclusion(device_index: u32, excluded: bool) -> Resul
     Ok(())
 }
 
+/// Undoes a device list that the user emptied out to turn mining off, so re-enabling GPU mining
+/// does not leave a miner that refuses to start. Scoped to every miner, because the one that was
+/// emptied is not necessarily the one selected now.
+#[tauri::command]
+pub async fn include_devices_of_unusable_gpu_miners() -> Result<(), String> {
+    ConfigMining::update_field(ConfigMiningContent::include_devices_of_unusable_miners, ())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    EventsEmitter::emit_update_gpu_devices_settings(
+        ConfigMining::content().await.gpu_devices_settings().clone(),
+    )
+    .await;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn set_gpu_mining_enabled(enabled: bool) -> Result<(), InvokeError> {
     let timer = Instant::now();

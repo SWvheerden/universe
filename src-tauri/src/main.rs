@@ -496,6 +496,7 @@ fn main() {
             commands::proceed_with_update,
             commands::set_pre_release,
             commands::toggle_device_exclusion,
+            commands::include_devices_of_unusable_gpu_miners,
             commands::set_airdrop_tokens,
             commands::get_airdrop_tokens,
             commands::frontend_ready,

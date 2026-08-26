@@ -583,6 +583,10 @@ async fn shutdown_signal_prevents_restart() {
 /// Real adapters call back into their manager from there, and the code shutting the watcher down
 /// is usually the one already holding that manager's lock: without racing the two, the watcher
 /// parks on the lock and its stopper parks on the watcher.
+///
+/// The exit code matters as much as the timing: callers turn what this returns into the process
+/// exit code, so giving up on `handle_unhealthy` must report why the child actually died rather
+/// than a synthetic failure.
 #[tokio::test]
 async fn a_stuck_handle_unhealthy_gives_up_when_the_watcher_is_shut_down() {
     let (
@@ -599,6 +603,10 @@ async fn a_stuck_handle_unhealthy_gives_up_when_the_watcher_is_shut_down() {
     let status_monitor = MockStatusMonitor::new()
         .with_health_status(HealthStatus::Unhealthy)
         .block_handle_unhealthy();
+
+    // A code that is neither 0 nor the synthetic 1 a shutdown used to report.
+    const CHILD_EXIT_CODE: i32 = 7;
+    child.exit_code.store(CHILD_EXIT_CODE, Ordering::SeqCst);
 
     let mut stopper = inner_shutdown.clone();
     tokio::spawn(async move {
@@ -631,5 +639,9 @@ async fn a_stuck_handle_unhealthy_gives_up_when_the_watcher_is_shut_down() {
     .expect("do_health_check must not outlive the shutdown")
     .unwrap();
 
-    assert!(result.is_some(), "the watcher should stop, not restart");
+    assert_eq!(
+        result,
+        Some(CHILD_EXIT_CODE),
+        "the watcher should stop and report the child's own exit code"
+    );
 }

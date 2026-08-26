@@ -27,6 +27,7 @@ export interface MiningStoreState {
     network?: Network;
     availableMiners?: Partial<Record<GpuMinerType, GpuMiner>>; // Only holds the miners that were initialized on this machine
     selectedMiner?: GpuMinerType;
+    isSwitchingMiner: boolean;
     sessionMiningTime: SessionMiningTime;
     showEcoAlert: boolean;
     selectedResumeDuration?: ResumeMiningTime;
@@ -51,6 +52,7 @@ const initialState: MiningStoreState = {
     network: undefined,
     availableMiners: undefined,
     selectedMiner: undefined,
+    isSwitchingMiner: false,
     showEcoAlert: false,
 };
 

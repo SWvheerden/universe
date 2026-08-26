@@ -36,6 +36,7 @@ interface Props {
     miners: GpuMiner[];
     selectedMiner?: GpuMiner;
     onChange: (minerType: GpuMinerType) => void;
+    disabled?: boolean;
 }
 
 const errorLabelStyle = {
@@ -48,7 +49,7 @@ const errorLabelStyle = {
     border: '1px solid rgba(239, 68, 68, 0.3)',
 };
 
-export function GpuMinerSelect({ miners, selectedMiner, onChange }: Props) {
+export function GpuMinerSelect({ miners, selectedMiner, onChange, disabled }: Props) {
     const { t } = useTranslation('settings', { useSuspense: false });
     const [isOpen, setIsOpen] = useState(false);
     const [activeIndex, setActiveIndex] = useState<number | null>(null);
@@ -61,7 +62,7 @@ export function GpuMinerSelect({ miners, selectedMiner, onChange }: Props) {
         middleware: [offset({ mainAxis: 5 })],
     });
 
-    const click = useClick(context);
+    const click = useClick(context, { enabled: !disabled });
     const dismiss = useDismiss(context);
     const role = useRole(context, { role: 'listbox' });
     const listNavigation = useListNavigation(context, {
@@ -121,10 +122,12 @@ export function GpuMinerSelect({ miners, selectedMiner, onChange }: Props) {
                 {...getReferenceProps()}
                 $isHealthy={selectedMiner?.is_healthy}
                 $hasSelection={!!selectedMiner}
+                $disabled={disabled}
                 role="combobox"
                 aria-expanded={isOpen}
                 aria-haspopup="listbox"
-                tabIndex={0}
+                aria-disabled={disabled}
+                tabIndex={disabled ? -1 : 0}
             >
                 <TriggerContent>
                     <TriggerTitle>

@@ -22,6 +22,7 @@ export default function GpuMiners() {
     const availableMiners = useMiningStore((state) => state.availableMiners);
     const availableMinersValues = availableMiners ? Object.values(availableMiners).filter(Boolean) : undefined;
     const selectedMiner = useMiningStore(getSelectedMiner);
+    const isSwitchingMiner = useMiningStore((state) => state.isSwitchingMiner);
 
     const handleMinerChange = useCallback(async (value: GpuMinerType) => {
         await switchSelectedMiner(value);
@@ -39,6 +40,7 @@ export default function GpuMiners() {
                             miners={availableMinersValues}
                             selectedMiner={selectedMiner}
                             onChange={handleMinerChange}
+                            disabled={isSwitchingMiner}
                         />
                     </Wrapper>
                 </SettingsGroupContent>

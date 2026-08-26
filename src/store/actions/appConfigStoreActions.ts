@@ -191,26 +191,24 @@ export const setGpuMiningEnabled = async (enabled: boolean) => {
         useMiningStore.getState().isCpuMiningInitiated || useMiningStore.getState().isGpuMiningInitiated;
     const isGpuMiningInitiated = useMiningStore.getState().isGpuMiningInitiated;
     const gpuMining = useMiningMetricsStore.getState().gpu_mining_status.is_mining;
-    const gpuDevicesSettings = Object.values(getSelectedMinerDeviceSettings());
     if (gpuMining || isGpuMiningInitiated) {
         await stopGpuMining();
     }
     try {
+        // Turning GPU mining off is expressed by gpu_mining_enabled alone. It used to also exclude
+        // every device, which the backend never needed (start_mining_inner refuses on
+        // gpu_mining_enabled before it ever reads the exclusions) and which now cannot be undone
+        // reliably, since exclusions are per miner and the user may switch miners in between.
+        if (enabled) {
+            // The user can still empty a device list by hand to turn mining off, so re-enabling
+            // has to undo that or the miner it was done to will refuse to start.
+            await invoke('include_devices_of_unusable_gpu_miners');
+        }
         await invoke('set_gpu_mining_enabled', { enabled });
         if (anyMiningInitiated && enabled) {
             await startGpuMining();
         } else {
             await stopGpuMining();
-        }
-        if (enabled && gpuDevicesSettings.every((device) => device.is_excluded)) {
-            for (const device of gpuDevicesSettings) {
-                await toggleDeviceExclusion(device.device_id, false);
-            }
-        }
-        if (!enabled && gpuDevicesSettings.some((device) => !device.is_excluded)) {
-            for (const device of gpuDevicesSettings) {
-                await toggleDeviceExclusion(device.device_id, true);
-            }
         }
     } catch (e) {
         console.error('Could not set GPU mining enabled', e);
