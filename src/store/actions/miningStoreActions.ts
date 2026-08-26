@@ -185,7 +185,9 @@ export const switchSelectedMiner = async (newGpuMiner: GpuMinerType) => {
 
     // Until the backend has switched, its selected miner is still the old one. Device ids are
     // scoped per miner, so anything writing device settings in that window would write them
-    // against the wrong miner - the picker stays disabled for the duration.
+    // against the wrong miner - the picker and the device toggles stay disabled for the duration.
+    // Tearing the old miner down takes seconds, so the flag has to be set before that and cleared
+    // only once the backend has caught up.
     useMiningStore.setState({ selectedMiner: newGpuMiner, isSwitchingMiner: true });
 
     const anyMiningInitiated =
@@ -193,10 +195,10 @@ export const switchSelectedMiner = async (newGpuMiner: GpuMinerType) => {
     const isGpuMiningInitiated = useMiningStore.getState().isGpuMiningInitiated;
     const gpuMining = useMiningMetricsStore.getState().gpu_mining_status.is_mining;
 
-    if (gpuMining || isGpuMiningInitiated) {
-        await stopGpuMining();
-    }
     try {
+        if (gpuMining || isGpuMiningInitiated) {
+            await stopGpuMining();
+        }
         await invoke('switch_gpu_miner', { gpuMinerType: newGpuMiner });
 
         if (anyMiningInitiated) {

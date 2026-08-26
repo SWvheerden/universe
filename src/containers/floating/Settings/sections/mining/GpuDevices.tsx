@@ -36,9 +36,13 @@ const GpuDevices = memo(function GpuDevices() {
     const miningGpuInitiated = useMiningStore((s) => s.isGpuMiningInitiated);
     const isGpuMiningEnabled = useConfigMiningStore((s) => s.gpu_mining_enabled);
     const isExcludingGpuDevices = useMiningStore((s) => s.isExcludingGpuDevices);
+    // A toggle during a miner switch would be persisted against the miner the backend still has
+    // selected while being shown under the one the frontend already moved to.
+    const isSwitchingMiner = useMiningStore((s) => s.isSwitchingMiner);
     const isDisabled =
         !gpuMiningModuleInitialized ||
         isExcludingGpuDevices ||
+        isSwitchingMiner ||
         isGPUMining ||
         miningGpuInitiated ||
         !isGpuMiningEnabled;
