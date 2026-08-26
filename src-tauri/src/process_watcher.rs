@@ -350,6 +350,8 @@ pub(crate) async fn do_health_check<
             expected_startup_time,
             ping_failed,
             task_tracker,
+            global_shutdown_signal.clone(),
+            inner_shutdown.clone(),
             stop_on_exit_codes,
             stats,
         )
@@ -382,6 +384,8 @@ async fn handle_unhealthy_restart<
     expected_startup_time: Duration,
     ping_failed: bool,
     task_tracker: TaskTracker,
+    global_shutdown_signal: ShutdownSignal,
+    inner_shutdown: ShutdownSignal,
     stop_on_exit_codes: &[i32],
     stats: &mut ProcessWatcherStats,
 ) -> Result<Option<i32>, anyhow::Error> {
@@ -410,10 +414,19 @@ async fn handle_unhealthy_restart<
         warn!(target: LOG_TARGET_STATUSES, "Restarting {name} after health check failure");
         *uptime = Instant::now();
         stats.num_restarts += 1;
-        match status_monitor
-            .handle_unhealthy(*duration_since_last_healthy_status)
-            .await
-        {
+        // Adapters reach back into their manager from here, and a manager lock is usually already
+        // held by whoever triggered the shutdown (stopping or switching miners). Race the call
+        // against the shutdown signals, exactly like check_health above, so a shutting down watcher
+        // can never park on a lock its own stopper is waiting on.
+        let mut inner_shutdown2 = inner_shutdown.clone();
+        let mut app_shutdown2 = global_shutdown_signal.clone();
+        let handle_unhealthy_result = select! {
+            r = status_monitor.handle_unhealthy(*duration_since_last_healthy_status) => r,
+            _ = inner_shutdown2.wait() => Ok(HandleUnhealthyResult::Stop),
+            _ = app_shutdown2.wait() => Ok(HandleUnhealthyResult::Stop),
+        };
+
+        match handle_unhealthy_result {
             Ok(HandleUnhealthyResult::Continue) => {
                 info!(target: LOG_TARGET_STATUSES, "Continuing after unhealthy state for {name}");
             }

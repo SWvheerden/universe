@@ -43,6 +43,7 @@
   "gpu-device-enabled": "GPU Myn toestelle",
   "gpu-device-enabled-description": "Aktiveer of deaktiveer spesifieke GPU toestel.",
   "gpu-device-no-found": "⚠️ Geen GPU toestelle gevind nie",
+  "gpu-device-single-device-note": "{{miner}} mines on one GPU at a time — the first enabled device is used.",
   "gpu-engine": "Gpu Enjin",
   "gpu-miner-description": {
     "LolMiner": "Closed source C29 miner for AMD and NVIDIA GPUs",

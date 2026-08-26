@@ -145,6 +145,12 @@ pub struct ConfigMiningContent {
     gpu_mining_enabled: bool,
     cpu_mining_enabled: bool,
     gpu_devices_settings: GpuDevicesSettings,
+    /// The miner whose device numbering `gpu_devices_settings` is expressed in.
+    /// Miners enumerate devices differently (lolMiner walks CUDA and OpenCL, TARI.Miner uses the
+    /// nvidia-smi index), so a device id only means something together with the miner that produced
+    /// it. `None` marks settings written before this field existed.
+    #[serde(default, deserialize_with = "deserialize_optional_gpu_miner_type")]
+    gpu_devices_settings_source: Option<GpuMinerType>,
     #[serde(default, deserialize_with = "deserialize_gpu_miner_type")]
     gpu_miner_type: GpuMinerType,
     squad_override: Option<String>,
@@ -204,6 +210,7 @@ impl Default for ConfigMiningContent {
             gpu_mining_enabled: true,
             cpu_mining_enabled: true,
             gpu_devices_settings: GpuDevicesSettings::new(),
+            gpu_devices_settings_source: None,
             gpu_miner_type: GpuMinerType::default(),
             pause_on_battery_mode: PauseOnBatteryModeState::Enabled,
             squad_override: None,
@@ -228,6 +235,19 @@ where
     }))
 }
 
+/// Tolerant deserializer for the miner that owns the stored device numbering.
+/// Same reasoning as `deserialize_gpu_miner_type`: a miner name we no longer know means the stored
+/// numbering is not ours, which is exactly what `None` says.
+fn deserialize_optional_gpu_miner_type<'de, D>(
+    deserializer: D,
+) -> Result<Option<GpuMinerType>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw_miner_type = Option::<String>::deserialize(deserializer)?;
+    Ok(raw_miner_type.and_then(|name| GpuMinerType::from_name(&name)))
+}
+
 impl ConfigContentImpl for ConfigMiningContent {}
 impl ConfigMiningContent {
     pub fn update_custom_mode_cpu_usage(&mut self, cpu_usage_percentage: u32) -> &mut Self {
@@ -244,9 +264,27 @@ impl ConfigMiningContent {
         self
     }
 
-    /// Populate the GPU devices settings with the given device IDs.
-    /// If a device ID already exists, it will not be added again.
-    pub fn populate_gpu_devices_settings(&mut self, device_ids: Vec<u32>) -> &mut Self {
+    /// Populate the GPU devices settings with the device IDs a miner detected.
+    /// If a device ID already exists for that same miner, it will not be added again.
+    ///
+    /// Device ids are only comparable within one miner's enumeration, so settings left behind by a
+    /// different miner are dropped rather than merged. Merging them would silently apply an
+    /// exclusion to whichever device happens to share the id under the new miner, which can mean
+    /// mining the wrong card or refusing to mine at all.
+    pub fn populate_gpu_devices_settings(
+        &mut self,
+        (miner_type, device_ids): (GpuMinerType, Vec<u32>),
+    ) -> &mut Self {
+        if self.gpu_devices_settings_source.as_ref() != Some(&miner_type) {
+            info!(
+                target: LOG_TARGET_APP_LOGIC,
+                "Gpu device settings were stored for {:?}, resetting them for {miner_type}",
+                self.gpu_devices_settings_source
+            );
+            self.gpu_devices_settings = GpuDevicesSettings::new();
+            self.gpu_devices_settings_source = Some(miner_type);
+        }
+
         for device_id in device_ids {
             self.gpu_devices_settings.add(device_id);
         }
@@ -468,6 +506,53 @@ mod tests {
 
         assert_eq!(*content.gpu_miner_type(), GpuMinerType::LolMiner);
         assert!(!content.cpu_mining_enabled());
+    }
+
+    #[test]
+    fn device_settings_from_the_same_miner_are_kept() {
+        let mut content = ConfigMiningContent::default();
+
+        content.populate_gpu_devices_settings((GpuMinerType::LolMiner, vec![0, 1]));
+        content.enable_gpu_device_exclusion(1);
+        content.populate_gpu_devices_settings((GpuMinerType::LolMiner, vec![0, 1]));
+
+        assert_eq!(content.get_excluded_devices(), vec![1]);
+    }
+
+    #[test]
+    fn device_settings_are_dropped_when_another_miner_takes_over_the_numbering() {
+        let mut content = ConfigMiningContent::default();
+
+        // Under lolMiner's enumeration device 0 might be an AMD card the user turned off.
+        content.populate_gpu_devices_settings((GpuMinerType::LolMiner, vec![0, 1]));
+        content.enable_gpu_device_exclusion(0);
+        assert_eq!(content.get_excluded_devices(), vec![0]);
+
+        // TARI.Miner numbers from nvidia-smi, where device 0 is a completely different card, so
+        // carrying the exclusion over would silently skip the card the user wants to mine with.
+        content.populate_gpu_devices_settings((GpuMinerType::TariMiner, vec![0]));
+
+        assert!(content.get_excluded_devices().is_empty());
+        assert_eq!(
+            *content.gpu_devices_settings_source(),
+            Some(GpuMinerType::TariMiner)
+        );
+    }
+
+    #[test]
+    fn device_settings_written_before_the_source_was_tracked_are_dropped_once() {
+        // Configs from before this field existed carry device ids with no miner attached, so the
+        // first miner to detect devices has to start from a clean slate.
+        let mut content: ConfigMiningContent = serde_json::from_str(
+            r#"{"gpu_devices_settings":{"0":{"device_id":0,"is_excluded":true}}}"#,
+        )
+        .expect("valid mining config");
+        assert_eq!(content.get_excluded_devices(), vec![0]);
+        assert_eq!(*content.gpu_devices_settings_source(), None);
+
+        content.populate_gpu_devices_settings((GpuMinerType::LolMiner, vec![0, 1]));
+
+        assert!(content.get_excluded_devices().is_empty());
     }
 
     #[test]

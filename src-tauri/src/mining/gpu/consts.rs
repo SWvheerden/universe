@@ -77,6 +77,7 @@ impl GpuMinerType {
             GpuMinerType::TariMiner => vec![
                 GpuMinerFeature::PoolMining,
                 GpuMinerFeature::DeviceExclusion,
+                GpuMinerFeature::SingleDeviceMining,
             ],
         }
     }
@@ -159,6 +160,9 @@ pub enum GpuMinerFeature {
     PoolMining,
     /// Support for excluding specific GPU devices
     DeviceExclusion,
+    /// Mines on one device at a time. Device exclusion still applies, but it picks which single
+    /// device is used rather than adding devices to the ones already mining.
+    SingleDeviceMining,
 }
 
 #[derive(Clone, Serialize)]

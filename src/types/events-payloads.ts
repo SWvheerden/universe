@@ -99,6 +99,7 @@ export enum GpuMinerFeature {
     SoloMining = 'SoloMining',
     PoolMining = 'PoolMining',
     DeviceExclusion = 'DeviceExclusion',
+    SingleDeviceMining = 'SingleDeviceMining',
     MiningIntensity = 'MiningIntensity',
     EngineSelection = 'EngineSelection',
 }

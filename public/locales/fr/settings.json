@@ -43,6 +43,7 @@
   "gpu-device-enabled": "Appareils de minage GPU",
   "gpu-device-enabled-description": "Activer ou désactiver un appareil GPU spécifique.",
   "gpu-device-no-found": "⚠️ Aucun appareil GPU trouvé",
+  "gpu-device-single-device-note": "{{miner}} mines on one GPU at a time — the first enabled device is used.",
   "gpu-engine": "Moteur GPU",
   "gpu-miner-description": {
     "LolMiner": "Closed source C29 miner for AMD and NVIDIA GPUs",

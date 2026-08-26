@@ -372,26 +372,49 @@ pub(crate) struct ProcessStartupSpec {
 
 /// Drains the child's piped stdout/stderr.
 /// Both pipes have to be drained, otherwise the child blocks once the pipe buffer fills up.
-fn forward_child_output(child: &mut tokio::process::Child, spec: &ProcessStartupSpec) {
+/// A read error ends the drain, which closes the pipe and kills the child on its next write, so
+/// it has to be logged rather than folded into the clean end-of-stream case.
+fn forward_child_output(
+    child: &mut tokio::process::Child,
+    spec: &ProcessStartupSpec,
+    task_tracker: &TaskTracker,
+) {
     let Some(sink) = spec.output_sink.clone() else {
         return;
     };
 
     if let Some(stdout) = child.stdout.take() {
-        tokio::spawn(async move {
+        let name = spec.name.clone();
+        task_tracker.spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                sink(&line);
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => sink(&line),
+                    Ok(None) => break,
+                    Err(e) => {
+                        warn!(target: LOG_TARGET_APP_LOGIC, "{name} stdout read failed, stopping the drain: {e}");
+                        break;
+                    }
+                }
             }
         });
     }
 
     if let Some(stderr) = child.stderr.take() {
         let name = spec.name.clone();
-        tokio::spawn(async move {
+        task_tracker.spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                warn!(target: LOG_TARGET_APP_LOGIC, "{name} stderr: {line}");
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        warn!(target: LOG_TARGET_APP_LOGIC, "{name} stderr: {line}");
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        warn!(target: LOG_TARGET_APP_LOGIC, "{name} stderr read failed, stopping the drain: {e}");
+                        break;
+                    }
+                }
             }
         });
     }
@@ -428,6 +451,7 @@ impl ProcessInstanceTrait for ProcessInstance {
             return Ok(());
         };
 
+        let output_task_tracker = task_tracker.clone();
         self.handle = Some(task_tracker.spawn(async move {
             if let Err(e) = set_permissions(&spec.file_path).await {
                 error!(target: LOG_TARGET_APP_LOGIC, "{e}");
@@ -444,7 +468,7 @@ impl ProcessInstanceTrait for ProcessInstance {
                 spec.output_sink.is_some()
             )?;
 
-            forward_child_output(&mut child, &spec);
+            forward_child_output(&mut child, &spec, &output_task_tracker);
 
             if let Some(id) = child.id() {
                 let pid_file_res = write_pid_file(&spec, id);

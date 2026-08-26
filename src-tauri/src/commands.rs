@@ -1469,7 +1469,7 @@ pub async fn switch_gpu_miner(gpu_miner_type: GpuMinerType) -> Result<(), String
 
     GpuManager::write()
         .await
-        .switch_miner(gpu_miner_type)
+        .select_miner_by_user(gpu_miner_type)
         .await
         .map_err(|e| e.to_string())?;
 

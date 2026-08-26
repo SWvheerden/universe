@@ -43,6 +43,7 @@
   "gpu-device-enabled": "Perangkat Penambangan GPU",
   "gpu-device-enabled-description": "Aktifkan atau nonaktifkan perangkat GPU tertentu.",
   "gpu-device-no-found": "⚠️ Tidak ada perangkat GPU yang ditemukan",
+  "gpu-device-single-device-note": "{{miner}} mines on one GPU at a time — the first enabled device is used.",
   "gpu-engine": "Mesin Gpu",
   "gpu-miner-description": {
     "LolMiner": "Closed source C29 miner for AMD and NVIDIA GPUs",

@@ -156,7 +156,7 @@ impl GpuMinerInterfaceTrait for LolMinerGpuMiner {
         EventsEmitter::emit_detected_devices(self.gpu_devices.clone()).await;
         ConfigMining::update_field(
             ConfigMiningContent::populate_gpu_devices_settings,
-            devices_indexes,
+            (GpuMinerType::LolMiner, devices_indexes),
         )
         .await?;
 

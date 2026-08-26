@@ -471,13 +471,26 @@ impl GpuManager {
             self.process_watcher.adapter = adapter;
             info!(target: LOG_TARGET_APP_LOGIC, "Set selected gpu miner interface in process watcher");
             EventsEmitter::emit_update_selected_gpu_miner(miner_cloned.miner_type).await;
-            ConfigMining::update_field(ConfigMiningContent::set_gpu_miner_type, miner_type.clone())
-                .await?;
             GpuPoolManager::handle_miner_switch(new_miner.clone()).await;
         } else {
             return Err(anyhow::anyhow!("Selected gpu miner is not available"));
         }
         info!(target: LOG_TARGET_APP_LOGIC, "Switched gpu miner to: {new_miner}");
+        Ok(())
+    }
+
+    /// Switches to the miner the user picked and remembers it as their choice.
+    ///
+    /// Only this path writes the config. Every automatic switch (start-up resolution, pool and node
+    /// capability fallbacks, health fallbacks) goes through `switch_miner`, so a fallback never
+    /// silently rewrites what the user asked for and the saved choice is honoured again as soon as
+    /// the miner works.
+    pub async fn select_miner_by_user(
+        &mut self,
+        new_miner: GpuMinerType,
+    ) -> Result<(), anyhow::Error> {
+        self.switch_miner(new_miner.clone()).await?;
+        ConfigMining::update_field(ConfigMiningContent::set_gpu_miner_type, new_miner).await?;
         Ok(())
     }
 

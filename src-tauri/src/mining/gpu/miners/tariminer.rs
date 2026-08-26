@@ -63,6 +63,20 @@ use crate::{
 /// TARI.Miner has no status API, it prints a periodic speed report to stdout instead.
 /// A sample older than this is treated as if the miner stopped producing graphs.
 const SPEED_SAMPLE_STALE_AFTER: Duration = Duration::from_secs(120);
+/// How long a freshly started miner may stay silent before silence stops meaning "starting up".
+/// Building the CUDA context, allocating the solver pipelines and completing the stratum handshake
+/// all happen before the first graph, and that is far longer than the process watcher's 20s
+/// expected startup time. Restarting during it just starts the same wait over again, forever.
+const STARTUP_GRACE_PERIOD: Duration = Duration::from_secs(600);
+/// Whether the absence of a speed report is evidence that the miner stalled.
+///
+/// TARI.Miner starts with `setvbuf(stdout, NULL, _IOLBF, 0)`. glibc honours that and line buffers,
+/// so on Linux every speed report reaches us as soon as it is printed and a silent miner really has
+/// stopped producing graphs. The statically linked MSVC CRT used for the Windows build documents
+/// `_IOLBF` as behaving like `_IOFBF` and rejects a zero buffer size outright, so a piped stdout
+/// stays block buffered there: a Windows miner can be mining perfectly and still say nothing for
+/// minutes. Its documented exit codes are the supervision contract on that platform instead.
+const SILENCE_MEANS_STALLED: bool = !cfg!(target_os = "windows");
 /// Sub folder of the extracted release archive that holds the per architecture backends.
 const BACKENDS_FOLDER: &str = "bin";
 
@@ -212,10 +226,21 @@ fn parse_speed_line(line: &str) -> Option<f64> {
     captures.get(1)?.as_str().parse::<f64>().ok()
 }
 
+/// What the status monitor knows about the miner's output at a point in time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TariMinerSpeedSnapshot {
+    /// The last graph rate, if one was reported recently enough to still be meaningful.
+    pub fresh_speed: Option<f64>,
+    /// Whether this miner instance has ever reported a graph rate.
+    /// Before that, silence means "still starting up"; after it, silence means "went quiet".
+    pub has_ever_reported: bool,
+}
+
 /// Keeps the last graph rate TARI.Miner reported on stdout so the status monitor can read it.
 #[derive(Clone, Default)]
 pub struct TariMinerSpeedTracker {
     last_sample: Arc<Mutex<Option<(f64, Instant)>>>,
+    has_ever_reported: Arc<AtomicBool>,
 }
 
 impl TariMinerSpeedTracker {
@@ -230,18 +255,50 @@ impl TariMinerSpeedTracker {
                 warn!(target: LOG_TARGET_STATUSES, "Could not store the TARI.Miner speed sample: {error}");
             }
         }
+        self.has_ever_reported.store(true, Ordering::Relaxed);
     }
 
-    /// Returns the last reported graph rate, or `None` when nothing was reported recently enough.
-    fn latest_speed(&self) -> Option<f64> {
-        let sample = self.last_sample.lock().ok()?;
-        let (speed, reported_at) = (*sample)?;
+    fn snapshot(&self) -> TariMinerSpeedSnapshot {
+        let fresh_speed = self.last_sample.lock().ok().and_then(|sample| {
+            let (speed, reported_at) = (*sample)?;
+            (reported_at.elapsed() <= SPEED_SAMPLE_STALE_AFTER).then_some(speed)
+        });
 
-        if reported_at.elapsed() > SPEED_SAMPLE_STALE_AFTER {
-            return None;
+        TariMinerSpeedSnapshot {
+            fresh_speed,
+            has_ever_reported: self.has_ever_reported.load(Ordering::Relaxed),
         }
+    }
 
-        Some(speed)
+    /// Forgets everything the previous process reported.
+    /// The watcher reuses the monitor across restarts, so without this a restarted miner would
+    /// inherit the old instance's "has reported" latch and its first silent seconds would read as a
+    /// stall instead of a start-up.
+    fn reset(&self) {
+        if let Ok(mut sample) = self.last_sample.lock() {
+            *sample = None;
+        }
+        self.has_ever_reported.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Decides what a health check should report, given how long the process has been up and what the
+/// miner has said so far. Split out from `check_health` so the policy can be tested directly.
+fn resolve_health_status(uptime: Duration, snapshot: TariMinerSpeedSnapshot) -> HealthStatus {
+    if snapshot.fresh_speed.is_some() {
+        return HealthStatus::Healthy;
+    }
+
+    if !snapshot.has_ever_reported && uptime < STARTUP_GRACE_PERIOD {
+        return HealthStatus::Initializing;
+    }
+
+    if SILENCE_MEANS_STALLED {
+        HealthStatus::Unhealthy
+    } else {
+        // Nothing to conclude from silence on this platform, so keep the miner running and let its
+        // exit codes drive the restarts.
+        HealthStatus::Healthy
     }
 }
 
@@ -363,7 +420,7 @@ impl GpuMinerInterfaceTrait for TariMinerGpuMiner {
         EventsEmitter::emit_detected_devices(common_devices).await;
         ConfigMining::update_field(
             ConfigMiningContent::populate_gpu_devices_settings,
-            devices_indexes,
+            (GpuMinerType::TariMiner, devices_indexes),
         )
         .await?;
 
@@ -502,6 +559,9 @@ impl StatusMonitor for TariMinerGpuMinerStatusMonitor {
         &self,
         duration_since_last_healthy_status: Duration,
     ) -> Result<HandleUnhealthyResult, anyhow::Error> {
+        // The watcher calls this right before restarting the miner and reuses this monitor for the
+        // new process, so the previous instance's output must not colour the new one's health.
+        self.speed_tracker.reset();
         info!(target: LOG_TARGET_STATUSES, "Handling unhealthy status for TariMinerGpuMiner | Duration since last healthy status: {:?}", duration_since_last_healthy_status.as_secs());
         if duration_since_last_healthy_status.as_secs().gt(&(60 * 3)) // Fallback after 3 minutes of unhealthiness
             && !WAS_FALLBACK_TO_OTHER_MINER_TRIGGERED.load(Ordering::SeqCst)
@@ -522,42 +582,63 @@ impl StatusMonitor for TariMinerGpuMinerStatusMonitor {
         }
     }
 
-    async fn check_health(&self, _uptime: Duration, _timeout_duration: Duration) -> HealthStatus {
-        let status = self.status();
-        let is_mining = status.is_mining;
-        let _ = self.gpu_status_sender.send(status);
+    async fn check_health(&self, uptime: Duration, _timeout_duration: Duration) -> HealthStatus {
+        let snapshot = self.speed_tracker.snapshot();
+        let health_status = resolve_health_status(uptime, snapshot);
+        let _ = self
+            .gpu_status_sender
+            .send(Self::status(&health_status, snapshot));
 
-        if is_mining {
-            if !GpuManager::read().await.is_current_miner_healthy().await {
-                info!(target: LOG_TARGET_STATUSES, "Marking current miner as healthy again");
-                let _unused = GpuManager::write().await.handle_healthy_miner().await;
+        match health_status {
+            HealthStatus::Initializing => {
+                info!(target: LOG_TARGET_STATUSES, "TARI.Miner has not reported a graph rate yet, still starting up");
             }
-            HealthStatus::Healthy
-        } else {
-            HealthStatus::Unhealthy
+            HealthStatus::Healthy if snapshot.fresh_speed.is_none() => {
+                warn!(target: LOG_TARGET_STATUSES, "TARI.Miner is running but has not reported a graph rate; its stdout is block buffered on this platform, so silence is not treated as a stall");
+            }
+            HealthStatus::Healthy => {
+                if !GpuManager::read().await.is_current_miner_healthy().await {
+                    info!(target: LOG_TARGET_STATUSES, "Marking current miner as healthy again");
+                    let _unused = GpuManager::write().await.handle_healthy_miner().await;
+                }
+            }
+            _ => {
+                warn!(target: LOG_TARGET_STATUSES, "TARI.Miner stopped reporting a graph rate");
+            }
         }
+
+        health_status
     }
 }
 
 impl TariMinerGpuMinerStatusMonitor {
-    pub fn status(&self) -> GpuMinerStatus {
-        match self.speed_tracker.latest_speed() {
-            Some(hash_rate) => GpuMinerStatus {
+    /// Health, not the presence of a speed report, decides whether we are mining: where stdout is
+    /// block buffered the miner can be mining for minutes without having told us its rate, and
+    /// reporting that as "not mining" would be a plain misreport. The rate itself stays best effort.
+    fn status(health_status: &HealthStatus, snapshot: TariMinerSpeedSnapshot) -> GpuMinerStatus {
+        if matches!(health_status, HealthStatus::Healthy) {
+            return GpuMinerStatus {
                 is_mining: true,
-                hash_rate,
+                hash_rate: snapshot.fresh_speed.unwrap_or(0.0),
                 estimated_earnings: 0,
                 algorithm: GpuMinerType::TariMiner.main_algorithm(),
-            },
-            None => {
-                GpuMinerStatus::default_with_algorithm(GpuMinerType::TariMiner.main_algorithm())
-            }
+            };
         }
+
+        GpuMinerStatus::default_with_algorithm(GpuMinerType::TariMiner.main_algorithm())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot(fresh_speed: Option<f64>, has_ever_reported: bool) -> TariMinerSpeedSnapshot {
+        TariMinerSpeedSnapshot {
+            fresh_speed,
+            has_ever_reported,
+        }
+    }
 
     fn device(device_id: u32, backend: TariMinerBackend) -> TariMinerDevice {
         TariMinerDevice {
@@ -676,14 +757,115 @@ mod tests {
     #[test]
     fn a_recorded_speed_is_reported_and_a_missing_one_is_not() {
         let tracker = TariMinerSpeedTracker::default();
-        assert_eq!(tracker.latest_speed(), None);
+        assert_eq!(tracker.snapshot(), snapshot(None, false));
 
         tracker.record_line("share accepted (3 total)");
-        assert_eq!(tracker.latest_speed(), None);
+        assert_eq!(tracker.snapshot(), snapshot(None, false));
 
         tracker
             .record_line("speed 4.21 g/s | graphs=42 cycles=1 submitted=1 accepted=1 rejected=0");
-        assert_eq!(tracker.latest_speed(), Some(4.21));
+        assert_eq!(tracker.snapshot(), snapshot(Some(4.21), true));
+    }
+
+    #[test]
+    fn resetting_the_tracker_makes_a_restarted_miner_look_freshly_started() {
+        let tracker = TariMinerSpeedTracker::default();
+        tracker
+            .record_line("speed 4.21 g/s | graphs=42 cycles=1 submitted=1 accepted=1 rejected=0");
+
+        tracker.reset();
+
+        assert_eq!(tracker.snapshot(), snapshot(None, false));
+        // ...so the restarted process reads as starting up rather than as the previous instance
+        // stalling, and the watcher does not restart it straight back into the same wait.
+        assert_eq!(
+            resolve_health_status(Duration::from_secs(25), tracker.snapshot()),
+            HealthStatus::Initializing
+        );
+    }
+
+    #[test]
+    fn a_miner_that_has_not_reported_yet_is_initializing_for_the_whole_grace_period() {
+        let starting_up = snapshot(None, false);
+
+        // The watcher's 20s expected startup time is nowhere near a CUDA context plus a stratum
+        // handshake, so the case that matters is well past it.
+        for uptime in [
+            Duration::ZERO,
+            Duration::from_secs(25),
+            Duration::from_secs(300),
+        ] {
+            assert_eq!(
+                resolve_health_status(uptime, starting_up),
+                HealthStatus::Initializing,
+                "uptime {uptime:?} should still count as starting up"
+            );
+        }
+
+        assert_ne!(
+            resolve_health_status(STARTUP_GRACE_PERIOD, starting_up),
+            HealthStatus::Initializing
+        );
+    }
+
+    #[test]
+    fn a_reporting_miner_is_healthy_whatever_its_uptime() {
+        let mining = snapshot(Some(4.21), true);
+
+        assert_eq!(
+            resolve_health_status(Duration::ZERO, mining),
+            HealthStatus::Healthy
+        );
+        assert_eq!(
+            resolve_health_status(Duration::from_secs(60 * 60), mining),
+            HealthStatus::Healthy
+        );
+    }
+
+    #[test]
+    fn the_reported_status_follows_health_rather_than_the_presence_of_a_speed_report() {
+        let mining = TariMinerGpuMinerStatusMonitor::status(
+            &HealthStatus::Healthy,
+            snapshot(Some(4.21), true),
+        );
+        assert!(mining.is_mining);
+        assert!((mining.hash_rate - 4.21).abs() < f64::EPSILON);
+
+        // Healthy but silent (block buffered stdout): still mining, rate simply unknown.
+        let silent =
+            TariMinerGpuMinerStatusMonitor::status(&HealthStatus::Healthy, snapshot(None, false));
+        assert!(silent.is_mining);
+        assert!((silent.hash_rate - 0.0).abs() < f64::EPSILON);
+
+        for health_status in [HealthStatus::Initializing, HealthStatus::Unhealthy] {
+            let status =
+                TariMinerGpuMinerStatusMonitor::status(&health_status, snapshot(Some(4.21), true));
+            assert!(
+                !status.is_mining,
+                "{health_status:?} must not report mining"
+            );
+            assert!((status.hash_rate - 0.0).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn silence_only_counts_as_a_stall_where_stdout_reaches_us_promptly() {
+        let past_grace = STARTUP_GRACE_PERIOD + Duration::from_secs(1);
+        let expected = if SILENCE_MEANS_STALLED {
+            HealthStatus::Unhealthy
+        } else {
+            HealthStatus::Healthy
+        };
+
+        // Went quiet after having reported, and never reported at all past the grace period.
+        assert_eq!(
+            resolve_health_status(Duration::ZERO, snapshot(None, true)),
+            expected
+        );
+        assert_eq!(
+            resolve_health_status(past_grace, snapshot(None, false)),
+            expected
+        );
     }
 
     #[test]
