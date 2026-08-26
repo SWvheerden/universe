@@ -38,7 +38,7 @@ use crate::{
     LOG_TARGET_APP_LOGIC, LOG_TARGET_STATUSES, UniverseAppState,
     binaries::Binaries,
     configs::{
-        config_mining::ConfigMining,
+        config_mining::{ConfigMining, ConfigMiningContent},
         config_pools::ConfigPools,
         pools::{PoolOrigin, gpu_pools::GpuPool},
         trait_config::ConfigImpl,
@@ -48,9 +48,11 @@ use crate::{
     mining::{
         GpuConnectionType, MinerControlsState, MiningError,
         gpu::{
-            consts::{GpuMiner, GpuMinerStatus, GpuMinerType, MINERS_PRIORITY},
+            consts::{
+                GpuMiner, GpuMinerStatus, GpuMinerType, MINERS_PRIORITY, resolve_selected_miner,
+            },
             interface::{GpuMinerInterface, GpuMinerInterfaceTrait},
-            miners::lolminer::LolMinerGpuMiner,
+            miners::{lolminer::LolMinerGpuMiner, tariminer::TariMinerGpuMiner},
         },
         pools::{PoolManagerInterfaceTrait, gpu_pool_manager::GpuPoolManager},
     },
@@ -143,14 +145,20 @@ impl GpuManager {
         instance.node_status_channel = node_status_channel;
     }
 
-    // Loads the saved miner - always uses LolMiner since it's the only GPU miner
+    // Loads the miner the user picked, or the highest priority healthy one when that miner cannot
+    // be used on this machine
     pub async fn load_saved_miner(&mut self) -> Result<(), anyhow::Error> {
-        let selected_gpu_miner_type = GpuMinerType::LolMiner;
-
-        if self.available_miners.contains_key(&selected_gpu_miner_type) {
-            info!(target: LOG_TARGET_APP_LOGIC, "Loaded gpu miner: {selected_gpu_miner_type}");
-        } else {
+        let saved_gpu_miner_type = ConfigMining::content().await.gpu_miner_type().clone();
+        let Some(selected_gpu_miner_type) =
+            resolve_selected_miner(&saved_gpu_miner_type, &self.available_miners)
+        else {
             return Err(anyhow::anyhow!("No available gpu miners to load"));
+        };
+
+        if selected_gpu_miner_type == saved_gpu_miner_type {
+            info!(target: LOG_TARGET_APP_LOGIC, "Loaded saved gpu miner: {selected_gpu_miner_type}");
+        } else {
+            info!(target: LOG_TARGET_APP_LOGIC, "Saved gpu miner {saved_gpu_miner_type} is not usable, falling back to: {selected_gpu_miner_type}");
         }
 
         self.switch_miner(selected_gpu_miner_type).await?;
@@ -355,6 +363,7 @@ impl GpuManager {
 
                 let binary = match self.selected_miner {
                     GpuMinerType::LolMiner => Binaries::LolMiner,
+                    GpuMinerType::TariMiner => Binaries::TariMiner,
                 };
 
                 // Worker name format depends on the pool
@@ -462,6 +471,8 @@ impl GpuManager {
             self.process_watcher.adapter = adapter;
             info!(target: LOG_TARGET_APP_LOGIC, "Set selected gpu miner interface in process watcher");
             EventsEmitter::emit_update_selected_gpu_miner(miner_cloned.miner_type).await;
+            ConfigMining::update_field(ConfigMiningContent::set_gpu_miner_type, miner_type.clone())
+                .await?;
             GpuPoolManager::handle_miner_switch(new_miner.clone()).await;
         } else {
             return Err(anyhow::anyhow!("Selected gpu miner is not available"));
@@ -554,7 +565,12 @@ impl GpuManager {
         let mut successful_detection = false;
         let mut unhealthy_miners = vec![];
 
-        for miner_type in self.available_miners.keys() {
+        // Iterate in priority order so the devices the highest priority miner sees are the ones
+        // that end up published last, instead of depending on the hash map iteration order
+        for miner_type in MINERS_PRIORITY.iter().rev() {
+            if !self.available_miners.contains_key(miner_type) {
+                continue;
+            }
             let mut adapter = self.resolve_miner_interface(miner_type);
             let detection_result = adapter.detect_devices().await;
             match detection_result {
@@ -588,6 +604,9 @@ impl GpuManager {
     fn resolve_miner_interface(&self, miner_type: &GpuMinerType) -> GpuMinerInterface {
         match miner_type {
             GpuMinerType::LolMiner => GpuMinerInterface::LolMiner(LolMinerGpuMiner::new(
+                self.gpu_internal_status_channel.clone(),
+            )),
+            GpuMinerType::TariMiner => GpuMinerInterface::TariMiner(TariMinerGpuMiner::new(
                 self.gpu_internal_status_channel.clone(),
             )),
         }

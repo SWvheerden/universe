@@ -25,7 +25,7 @@ export interface MiningStoreState {
     resumeAfterRestart: { cpu: boolean; gpu: boolean };
     customLevelsDialogOpen: boolean;
     network?: Network;
-    availableMiners?: Record<GpuMinerType, GpuMiner>;
+    availableMiners?: Partial<Record<GpuMinerType, GpuMiner>>; // Only holds the miners that were initialized on this machine
     selectedMiner?: GpuMinerType;
     sessionMiningTime: SessionMiningTime;
     showEcoAlert: boolean;

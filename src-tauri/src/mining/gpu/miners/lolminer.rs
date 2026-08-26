@@ -276,6 +276,7 @@ impl ProcessAdapter for LolMinerGpuMiner {
                     data_dir: base_folder,
                     pid_file_name: self.pid_file_name().to_string(),
                     name: self.name().to_string(),
+                    output_sink: None,
                 },
                 handle: None,
             },

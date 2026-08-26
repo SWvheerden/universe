@@ -23,9 +23,10 @@
 use super::trait_config::{ConfigContentImpl, ConfigImpl};
 use crate::LOG_TARGET_APP_LOGIC;
 use crate::events_emitter::EventsEmitter;
+use crate::mining::gpu::consts::GpuMinerType;
 use getset::{Getters, Setters};
 use log::{info, warn};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::time::Duration;
 use std::{collections::HashMap, fmt::Display, sync::LazyLock, time::SystemTime};
 use tauri::AppHandle;
@@ -144,6 +145,8 @@ pub struct ConfigMiningContent {
     gpu_mining_enabled: bool,
     cpu_mining_enabled: bool,
     gpu_devices_settings: GpuDevicesSettings,
+    #[serde(default, deserialize_with = "deserialize_gpu_miner_type")]
+    gpu_miner_type: GpuMinerType,
     squad_override: Option<String>,
     pause_on_battery_mode: PauseOnBatteryModeState,
     is_lolminer_tested: bool,
@@ -201,6 +204,7 @@ impl Default for ConfigMiningContent {
             gpu_mining_enabled: true,
             cpu_mining_enabled: true,
             gpu_devices_settings: GpuDevicesSettings::new(),
+            gpu_miner_type: GpuMinerType::default(),
             pause_on_battery_mode: PauseOnBatteryModeState::Enabled,
             squad_override: None,
             is_lolminer_tested: false,
@@ -210,6 +214,20 @@ impl Default for ConfigMiningContent {
         }
     }
 }
+/// Tolerant deserializer for the selected GPU miner.
+/// Configs written by older versions can still hold a miner that no longer exists (the SHA3 miners
+/// that were removed), and those must not make the whole mining config fail to load.
+fn deserialize_gpu_miner_type<'de, D>(deserializer: D) -> Result<GpuMinerType, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw_miner_type = String::deserialize(deserializer)?;
+    Ok(GpuMinerType::from_name(&raw_miner_type).unwrap_or_else(|| {
+        warn!(target: LOG_TARGET_APP_LOGIC, "Unknown gpu miner {raw_miner_type} in the mining config, falling back to the default one");
+        GpuMinerType::default()
+    }))
+}
+
 impl ConfigContentImpl for ConfigMiningContent {}
 impl ConfigMiningContent {
     pub fn update_custom_mode_cpu_usage(&mut self, cpu_usage_percentage: u32) -> &mut Self {
@@ -418,5 +436,49 @@ impl ConfigImpl for ConfigMining {
 
     async fn load_app_handle(&mut self, app_handle: AppHandle) {
         *self.app_handle.write().await = Some(app_handle);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_config_without_a_gpu_miner_keeps_the_default_one() {
+        let content: ConfigMiningContent =
+            serde_json::from_str(r#"{"selected_mining_mode":"Eco"}"#).expect("valid mining config");
+
+        assert_eq!(*content.gpu_miner_type(), GpuMinerType::LolMiner);
+        assert_eq!(content.selected_mining_mode(), "Eco");
+    }
+
+    #[test]
+    fn a_saved_gpu_miner_is_restored() {
+        let content: ConfigMiningContent =
+            serde_json::from_str(r#"{"gpu_miner_type":"TariMiner"}"#).expect("valid mining config");
+
+        assert_eq!(*content.gpu_miner_type(), GpuMinerType::TariMiner);
+    }
+
+    #[test]
+    fn a_removed_gpu_miner_falls_back_to_the_default_one_instead_of_failing_the_load() {
+        let content: ConfigMiningContent =
+            serde_json::from_str(r#"{"gpu_miner_type":"Graxil","cpu_mining_enabled":false}"#)
+                .expect("legacy mining configs still load");
+
+        assert_eq!(*content.gpu_miner_type(), GpuMinerType::LolMiner);
+        assert!(!content.cpu_mining_enabled());
+    }
+
+    #[test]
+    fn the_selected_gpu_miner_round_trips_through_serialization() {
+        let mut content = ConfigMiningContent::default();
+        content.set_gpu_miner_type(GpuMinerType::TariMiner);
+
+        let serialized = serde_json::to_string(&content).expect("serializable mining config");
+        let deserialized: ConfigMiningContent =
+            serde_json::from_str(&serialized).expect("valid mining config");
+
+        assert_eq!(*deserialized.gpu_miner_type(), GpuMinerType::TariMiner);
     }
 }

@@ -92,6 +92,7 @@ export interface ProgressTrackerUpdatePayload {
 
 export enum GpuMinerType {
     LolMiner = 'LolMiner',
+    TariMiner = 'TariMiner',
 }
 
 export enum GpuMinerFeature {

@@ -29,7 +29,10 @@ use crate::{
     },
     events_emitter::EventsEmitter,
     hardware::hardware_status_monitor::HardwareStatusMonitor,
-    mining::gpu::{consts::GpuMinerType, manager::GpuManager},
+    mining::gpu::{
+        consts::{GpuMinerType, MINERS_PRIORITY},
+        manager::GpuManager,
+    },
     progress_trackers::{
         progress_plans::SetupStep,
         progress_stepper::{ProgressStepper, ProgressStepperBuilder},
@@ -150,7 +153,10 @@ impl SetupPhaseImpl for GpuMiningSetupPhase {
     async fn setup_inner(&self) -> Result<(), Error> {
         // Check if any GPU miner is supported on this platform
         // If not (e.g., macOS), disable GPU mining and skip the entire phase
-        if !GpuMinerType::LolMiner.is_supported_on_current_platform() {
+        if !MINERS_PRIORITY
+            .iter()
+            .any(GpuMinerType::is_supported_on_current_platform)
+        {
             info!(target: LOG_TARGET_APP_LOGIC, "GPU mining not supported on this platform, disabling GPU mining");
             ConfigMining::update_field(ConfigMiningContent::set_gpu_mining_enabled, false).await?;
             ConfigMining::update_field(ConfigMiningContent::set_is_gpu_mining_recommended, false)
@@ -165,6 +171,9 @@ impl SetupPhaseImpl for GpuMiningSetupPhase {
         let binary_resolver = BinaryResolver::current();
 
         let lolminer_binary_progress_tracker =
+            progress_stepper.track_step_incrementally(SetupStep::BinariesGpuMiner);
+
+        let tariminer_binary_progress_tracker =
             progress_stepper.track_step_incrementally(SetupStep::BinariesGpuMiner);
 
         progress_stepper
@@ -195,9 +204,33 @@ impl SetupPhaseImpl for GpuMiningSetupPhase {
                         .await;
                 }
 
+                // TARI.Miner is supported on Windows | Linux
+                if GpuMinerType::TariMiner.is_supported_on_current_platform() {
+                    let tariminer_initialization_result = binary_resolver
+                        .initialize_binary(Binaries::TariMiner, tariminer_binary_progress_tracker)
+                        .await;
+
+                    let tariminer_err = tariminer_initialization_result.as_ref().err();
+
+                    if tariminer_initialization_result.is_ok() {
+                        is_any_miner_succeeded = true;
+                    } else {
+                        error!(target: LOG_TARGET_APP_LOGIC, "TARI.Miner initialization error: {:?}", tariminer_err);
+                    }
+
+                    GpuManager::write()
+                        .await
+                        .load_miner(
+                            GpuMinerType::TariMiner,
+                            tariminer_initialization_result.is_ok(),
+                            tariminer_err.map(|e| e.to_string()),
+                        )
+                        .await;
+                }
+
                 if !is_any_miner_succeeded {
                     return Err(anyhow::anyhow!(
-                        "Failed to initialize GPU miner binary: LolMiner"
+                        "Failed to initialize GPU miner binaries: LolMiner, TARI.Miner"
                     ));
                 }
 

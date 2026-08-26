@@ -489,6 +489,8 @@ fn main() {
             commands::start_gpu_mining,
             commands::stop_cpu_mining,
             commands::stop_gpu_mining,
+            commands::switch_gpu_miner,
+            commands::get_selected_gpu_miner,
             commands::toggle_cpu_pool_mining,
             commands::toggle_gpu_pool_mining,
             commands::proceed_with_update,

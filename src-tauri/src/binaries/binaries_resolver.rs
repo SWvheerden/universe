@@ -142,6 +142,19 @@ impl BinaryResolver {
         );
 
         binary_manager.insert(
+            Binaries::TariMiner,
+            BinaryManager::new(
+                Binaries::TariMiner.name().to_string(),
+                None,
+                Box::new(GithubReleasesAdapter {
+                    repo: "TARI.Miner".to_string(),
+                    owner: "tari-project".to_string(),
+                }),
+                false,
+            ),
+        );
+
+        binary_manager.insert(
             Binaries::MergeMiningProxy,
             BinaryManager::new(
                 Binaries::MergeMiningProxy.name().to_string(),

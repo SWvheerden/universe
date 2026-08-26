@@ -41,6 +41,7 @@ use crate::events_emitter::EventsEmitter;
 use crate::events_manager::EventsManager;
 use crate::internal_wallet::{InternalWallet, PaperWalletConfig, mnemonic_to_tari_cipher_seed};
 use crate::mining::cpu::manager::CpuManager;
+use crate::mining::gpu::consts::GpuMinerType;
 use crate::mining::gpu::manager::GpuManager;
 use crate::mining::pools::PoolManagerInterfaceTrait;
 use crate::mining::pools::cpu_pool_manager::CpuPoolManager;
@@ -1452,6 +1453,30 @@ pub async fn stop_gpu_mining() -> Result<(), String> {
     if timer.elapsed() > MAX_ACCEPTABLE_COMMAND_TIME {
         warn!(target: LOG_TARGET_APP_LOGIC, "stop_cpu_mining took too long: {:?}", timer.elapsed());
     }
+    Ok(())
+}
+
+/// Returns the GPU miner the user picked, so the frontend can render the picker before the
+/// backend pushes its first selected-miner event.
+#[tauri::command]
+pub async fn get_selected_gpu_miner() -> Result<GpuMinerType, String> {
+    Ok(ConfigMining::content().await.gpu_miner_type().clone())
+}
+
+#[tauri::command]
+pub async fn switch_gpu_miner(gpu_miner_type: GpuMinerType) -> Result<(), String> {
+    let timer = Instant::now();
+
+    GpuManager::write()
+        .await
+        .switch_miner(gpu_miner_type)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if timer.elapsed() > MAX_ACCEPTABLE_COMMAND_TIME {
+        warn!(target: LOG_TARGET_APP_LOGIC, "switch_gpu_miner took too long: {:?}", timer.elapsed());
+    }
+
     Ok(())
 }
 

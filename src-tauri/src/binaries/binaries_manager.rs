@@ -287,6 +287,7 @@ impl BinaryManager {
                 Binaries::MergeMiningProxy => &TasksTrackers::current().cpu_mining_phase,
                 Binaries::BridgeTapplet => &TasksTrackers::current().wallet_phase,
                 Binaries::LolMiner => &TasksTrackers::current().gpu_mining_phase,
+                Binaries::TariMiner => &TasksTrackers::current().gpu_mining_phase,
             };
             let binary_name = self.binary_name.clone();
             let shutdown_signal = task_tacker.get_signal().await;
