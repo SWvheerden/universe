@@ -393,8 +393,10 @@ async fn handle_unhealthy_restart<
     if uptime.elapsed() < expected_startup_time && !ping_failed {
         warn!(target: LOG_TARGET_STATUSES, "{name} is not healthy. Waiting for startup time to elapse");
     } else {
+        let mut child_exit_code = 1;
         match child.stop().await {
             Ok(exit_code) => {
+                child_exit_code = exit_code;
                 if exit_code != 0 {
                     if stop_on_exit_codes.contains(&exit_code) {
                         return Ok(Some(exit_code));
@@ -422,8 +424,10 @@ async fn handle_unhealthy_restart<
         let mut app_shutdown2 = global_shutdown_signal.clone();
         let handle_unhealthy_result = select! {
             r = status_monitor.handle_unhealthy(*duration_since_last_healthy_status) => r,
-            _ = inner_shutdown2.wait() => Ok(HandleUnhealthyResult::Stop),
-            _ = app_shutdown2.wait() => Ok(HandleUnhealthyResult::Stop),
+            // Report the child's own exit code rather than a synthetic failure: callers surface it
+            // as the process exit code, and a shutdown must not mask why the child actually died.
+            _ = inner_shutdown2.wait() => return Ok(Some(child_exit_code)),
+            _ = app_shutdown2.wait() => return Ok(Some(child_exit_code)),
         };
 
         match handle_unhealthy_result {

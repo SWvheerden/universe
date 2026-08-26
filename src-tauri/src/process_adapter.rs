@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::{Pid, ProcessesToUpdate, System};
-use tari_shutdown::Shutdown;
+use tari_shutdown::{Shutdown, ShutdownSignal};
 use tauri_plugin_sentry::sentry;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::runtime::Handle;
@@ -370,13 +370,52 @@ pub(crate) struct ProcessStartupSpec {
     pub output_sink: Option<ProcessOutputSink>,
 }
 
-/// Drains the child's piped stdout/stderr.
+/// Drains one of the child's piped streams, handing every line to `on_line`.
 /// Both pipes have to be drained, otherwise the child blocks once the pipe buffer fills up.
-/// A read error ends the drain, which closes the pipe and kills the child on its next write, so
-/// it has to be logged rather than folded into the clean end-of-stream case.
+///
+/// The drain ends on end-of-stream, on a read error, or on shutdown. It cannot end on
+/// end-of-stream alone: these tasks run on a task tracker whose `wait()` has no timeout, and the
+/// pipe stays open for as long as anything holds the write end, which includes a grandchild that
+/// inherited it and a child that a failed kill left running. A read error has to be logged rather
+/// than folded into the clean end-of-stream case, because ending the drain closes the pipe and
+/// kills the child on its next write.
+fn drain_child_stream<R>(
+    stream: R,
+    name: String,
+    stream_name: &'static str,
+    mut shutdown_signal: ShutdownSignal,
+    task_tracker: &TaskTracker,
+    on_line: impl Fn(&str) + Send + 'static,
+) where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    task_tracker.spawn(async move {
+        let mut lines = BufReader::new(stream).lines();
+        loop {
+            let line = select! {
+                line = lines.next_line() => line,
+                _ = shutdown_signal.wait() => {
+                    info!(target: LOG_TARGET_APP_LOGIC, "Shutting down the {name} {stream_name} drain");
+                    break;
+                }
+            };
+
+            match line {
+                Ok(Some(line)) => on_line(&line),
+                Ok(None) => break,
+                Err(e) => {
+                    warn!(target: LOG_TARGET_APP_LOGIC, "{name} {stream_name} read failed, stopping the drain: {e}");
+                    break;
+                }
+            }
+        }
+    });
+}
+
 fn forward_child_output(
     child: &mut tokio::process::Child,
     spec: &ProcessStartupSpec,
+    shutdown_signal: &ShutdownSignal,
     task_tracker: &TaskTracker,
 ) {
     let Some(sink) = spec.output_sink.clone() else {
@@ -384,39 +423,28 @@ fn forward_child_output(
     };
 
     if let Some(stdout) = child.stdout.take() {
-        let name = spec.name.clone();
-        task_tracker.spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) => sink(&line),
-                    Ok(None) => break,
-                    Err(e) => {
-                        warn!(target: LOG_TARGET_APP_LOGIC, "{name} stdout read failed, stopping the drain: {e}");
-                        break;
-                    }
-                }
-            }
-        });
+        drain_child_stream(
+            stdout,
+            spec.name.clone(),
+            "stdout",
+            shutdown_signal.clone(),
+            task_tracker,
+            move |line| sink(line),
+        );
     }
 
     if let Some(stderr) = child.stderr.take() {
         let name = spec.name.clone();
-        task_tracker.spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) => {
-                        warn!(target: LOG_TARGET_APP_LOGIC, "{name} stderr: {line}");
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        warn!(target: LOG_TARGET_APP_LOGIC, "{name} stderr read failed, stopping the drain: {e}");
-                        break;
-                    }
-                }
-            }
-        });
+        drain_child_stream(
+            stderr,
+            spec.name.clone(),
+            "stderr",
+            shutdown_signal.clone(),
+            task_tracker,
+            move |line| {
+                warn!(target: LOG_TARGET_APP_LOGIC, "{name} stderr: {line}");
+            },
+        );
     }
 }
 
@@ -452,6 +480,7 @@ impl ProcessInstanceTrait for ProcessInstance {
         };
 
         let output_task_tracker = task_tracker.clone();
+        let output_shutdown_signal = self.shutdown.to_signal();
         self.handle = Some(task_tracker.spawn(async move {
             if let Err(e) = set_permissions(&spec.file_path).await {
                 error!(target: LOG_TARGET_APP_LOGIC, "{e}");
@@ -468,7 +497,12 @@ impl ProcessInstanceTrait for ProcessInstance {
                 spec.output_sink.is_some()
             )?;
 
-            forward_child_output(&mut child, &spec, &output_task_tracker);
+            forward_child_output(
+                &mut child,
+                &spec,
+                &output_shutdown_signal,
+                &output_task_tracker,
+            );
 
             if let Some(id) = child.id() {
                 let pid_file_res = write_pid_file(&spec, id);

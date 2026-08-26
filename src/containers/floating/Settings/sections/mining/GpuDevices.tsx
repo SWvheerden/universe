@@ -16,7 +16,7 @@ import { GpuDevice } from '@app/types/app-status.ts';
 import { useMiningStore } from '@app/store/useMiningStore.ts';
 import { useConfigMiningStore } from '@app/store/useAppConfigStore.ts';
 import { useSetupStore } from '@app/store/useSetupStore.ts';
-import { toggleDeviceExclusion } from '@app/store/actions/appConfigStoreActions.ts';
+import { getSelectedMinerDeviceSettings, toggleDeviceExclusion } from '@app/store/actions/appConfigStoreActions.ts';
 import { setupStoreSelectors } from '@app/store/selectors/setupStoreSelectors.ts';
 import { getSelectedMiner } from '@app/store/selectors/minningStoreSelectors.ts';
 import { GpuMinerFeature } from '@app/types/events-payloads.ts';
@@ -24,12 +24,14 @@ import { GpuMinerFeature } from '@app/types/events-payloads.ts';
 const GpuDevices = memo(function GpuDevices() {
     const { t } = useTranslation(['common', 'settings'], { useSuspense: false });
     const gpuDevices = useMiningMetricsStore((s) => s.gpu_devices);
-    const gpuDevicesSettings = useConfigMiningStore((s) => s.gpu_devices_settings);
+    const gpuDevicesSettingsByMiner = useConfigMiningStore((s) => s.gpu_devices_settings);
     const isGPUMining = useMiningMetricsStore((s) => s.gpu_mining_status.is_mining);
     const gpuMiningModuleInitialized = useSetupStore(setupStoreSelectors.isGpuMiningModuleInitialized);
 
     const selectedMiner = useMiningStore(getSelectedMiner);
     const minesOnASingleDevice = selectedMiner?.features.includes(GpuMinerFeature.SingleDeviceMining) ?? false;
+    // Device ids only mean something inside the selected miner's own enumeration.
+    const gpuDevicesSettings = (selectedMiner && gpuDevicesSettingsByMiner[selectedMiner.miner_type]) || {};
 
     const miningGpuInitiated = useMiningStore((s) => s.isGpuMiningInitiated);
     const isGpuMiningEnabled = useConfigMiningStore((s) => s.gpu_mining_enabled);
@@ -41,12 +43,9 @@ const GpuDevices = memo(function GpuDevices() {
         miningGpuInitiated ||
         !isGpuMiningEnabled;
 
-    const handleSetExcludedDevice = useCallback(
-        async (device: GpuDevice) => {
-            await toggleDeviceExclusion(device.device_id, !gpuDevicesSettings[device.device_id]?.is_excluded);
-        },
-        [gpuDevicesSettings]
-    );
+    const handleSetExcludedDevice = useCallback(async (device: GpuDevice) => {
+        await toggleDeviceExclusion(device.device_id, !getSelectedMinerDeviceSettings()[device.device_id]?.is_excluded);
+    }, []);
 
     return (
         <>

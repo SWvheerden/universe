@@ -1058,19 +1058,23 @@ pub async fn set_display_mode(display_mode: &str) -> Result<(), InvokeError> {
 }
 #[tauri::command]
 pub async fn toggle_device_exclusion(device_index: u32, excluded: bool) -> Result<(), String> {
+    // Device ids only mean something together with the miner that enumerated them, and the devices
+    // the user is looking at are the ones the currently selected miner detected.
+    let miner_type = GpuManager::read().await.selected_miner().clone();
+
     if excluded {
-        info!(target: LOG_TARGET_APP_LOGIC, "Excluding device {device_index}");
+        info!(target: LOG_TARGET_APP_LOGIC, "Excluding {miner_type} device {device_index}");
         ConfigMining::update_field(
             ConfigMiningContent::enable_gpu_device_exclusion,
-            device_index,
+            (miner_type, device_index),
         )
         .await
         .map_err(|e| e.to_string())?;
     } else {
-        info!(target: LOG_TARGET_APP_LOGIC, "Including device {device_index}");
+        info!(target: LOG_TARGET_APP_LOGIC, "Including {miner_type} device {device_index}");
         ConfigMining::update_field(
             ConfigMiningContent::disable_gpu_device_exclusion,
-            device_index,
+            (miner_type, device_index),
         )
         .await
         .map_err(|e| e.to_string())?;

@@ -129,6 +129,13 @@ impl GpuManager {
         INSTANCE.write().await
     }
 
+    /// The miner that is currently loaded into the process watcher.
+    /// This is not always the miner saved in the config: an automatic fallback changes this one and
+    /// deliberately leaves the saved choice alone.
+    pub fn selected_miner(&self) -> &GpuMinerType {
+        &self.selected_miner
+    }
+
     pub async fn load_app_handle(&mut self, app_handle: AppHandle) {
         self.app_handle = Some(app_handle);
     }
@@ -377,7 +384,9 @@ impl GpuManager {
                     PoolOrigin::Kryptex => Some("/Tari-universe"),
                 };
 
-                let excluded_devices = ConfigMining::content().await.get_excluded_devices();
+                let excluded_devices = ConfigMining::content()
+                    .await
+                    .get_excluded_devices(&self.selected_miner);
 
                 self.process_watcher
                     .adapter
@@ -505,6 +514,10 @@ impl GpuManager {
             current_miner.last_error =
                 Some("Miner process crashed or became unresponsive".to_string());
         }
+        // Publish it straight away. This call can be cancelled (the watcher races it against
+        // shutdown), and leaving the frontend showing a miner as healthy after we stopped treating
+        // it as such is worse than emitting the same state twice.
+        EventsEmitter::emit_available_gpu_miners(self.available_miners.clone()).await;
 
         let fallback_miner = MINERS_PRIORITY
             .iter()
