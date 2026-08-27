@@ -110,6 +110,10 @@ impl GpuDevicesSettings {
         }
     }
 
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     fn is_every_device_excluded(&self) -> bool {
         !self.0.is_empty() && self.0.values().all(|settings| settings.is_excluded)
     }
@@ -140,6 +144,10 @@ pub struct GpuDevicesSettingsByMiner(HashMap<GpuMinerType, GpuDevicesSettings>);
 impl GpuDevicesSettingsByMiner {
     pub fn for_miner(&self, miner_type: &GpuMinerType) -> Option<&GpuDevicesSettings> {
         self.0.get(miner_type)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     fn for_miner_mut(&mut self, miner_type: GpuMinerType) -> &mut GpuDevicesSettings {
@@ -252,7 +260,22 @@ pub struct ConfigMiningContent {
     mine_on_app_start: bool,
     gpu_mining_enabled: bool,
     cpu_mining_enabled: bool,
-    gpu_devices_settings: GpuDevicesSettingsByMiner,
+    #[serde(default)]
+    gpu_devices_settings_by_miner: GpuDevicesSettingsByMiner,
+    /// Compatibility copy of lolMiner's device settings, under the name and the flat shape that
+    /// builds from before per miner settings expect.
+    ///
+    /// Those builds declare this field as `HashMap<u32, GpuDeviceSettings>`, and a present field
+    /// they cannot parse is a hard error there, which costs the user their whole mining config.
+    /// Keeping the old shape under the old name means a user who tries a pre-release and rolls
+    /// back keeps everything, lolMiner's exclusions included. Read only to migrate a config
+    /// written by such a build; `gpu_devices_settings_by_miner` is authoritative otherwise.
+    #[serde(
+        rename = "gpu_devices_settings",
+        default,
+        deserialize_with = "deserialize_legacy_gpu_devices_settings"
+    )]
+    legacy_gpu_devices_settings: GpuDevicesSettings,
     #[serde(default, deserialize_with = "deserialize_gpu_miner_type")]
     gpu_miner_type: GpuMinerType,
     squad_override: Option<String>,
@@ -311,7 +334,8 @@ impl Default for ConfigMiningContent {
             ]),
             gpu_mining_enabled: true,
             cpu_mining_enabled: true,
-            gpu_devices_settings: GpuDevicesSettingsByMiner::default(),
+            gpu_devices_settings_by_miner: GpuDevicesSettingsByMiner::default(),
+            legacy_gpu_devices_settings: GpuDevicesSettings::default(),
             gpu_miner_type: GpuMinerType::default(),
             pause_on_battery_mode: PauseOnBatteryModeState::Enabled,
             squad_override: None,
@@ -322,15 +346,36 @@ impl Default for ConfigMiningContent {
         }
     }
 }
+/// Tolerant deserializer for the legacy flat device settings.
+/// Anything that is not the flat shape - including the per miner map that intermediate builds
+/// briefly wrote under this name - is dropped rather than failing the whole config.
+fn deserialize_legacy_gpu_devices_settings<'de, D>(
+    deserializer: D,
+) -> Result<GpuDevicesSettings, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let stored = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value::<GpuDevicesSettings>(stored).unwrap_or_default())
+}
+
 /// Tolerant deserializer for the selected GPU miner.
 /// Configs written by older versions can still hold a miner that no longer exists (the SHA3 miners
-/// that were removed), and those must not make the whole mining config fail to load.
+/// that were removed), and those must not make the whole mining config fail to load. Neither must
+/// a value that is not a miner name at all, `null` included.
 fn deserialize_gpu_miner_type<'de, D>(deserializer: D) -> Result<GpuMinerType, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let raw_miner_type = String::deserialize(deserializer)?;
-    Ok(GpuMinerType::from_name(&raw_miner_type).unwrap_or_else(|| {
+    // Through Value rather than String directly: a non string value would otherwise leave the
+    // parser mid token, and there would be no whole config left to salvage.
+    let stored = serde_json::Value::deserialize(deserializer)?;
+    let Some(raw_miner_type) = stored.as_str() else {
+        warn!(target: LOG_TARGET_APP_LOGIC, "Gpu miner in the mining config is not a name, falling back to the default one");
+        return Ok(GpuMinerType::default());
+    };
+
+    Ok(GpuMinerType::from_name(raw_miner_type).unwrap_or_else(|| {
         warn!(target: LOG_TARGET_APP_LOGIC, "Unknown gpu miner {raw_miner_type} in the mining config, falling back to the default one");
         GpuMinerType::default()
     }))
@@ -356,36 +401,71 @@ impl ConfigMiningContent {
     /// If a device ID already exists for that same miner, it will not be added again.
     /// Settings belonging to the other miners are left untouched, so switching miners and switching
     /// back keeps whatever the user chose for each of them.
+    /// A config written before device settings were per miner only holds lolMiner's, under the
+    /// legacy key. Move them across the first time the per miner map is touched, so upgrading
+    /// keeps the user's exclusions.
+    fn adopt_legacy_gpu_devices_settings(&mut self) {
+        if !self.gpu_devices_settings_by_miner.is_empty()
+            || self.legacy_gpu_devices_settings.is_empty()
+        {
+            return;
+        }
+
+        info!(target: LOG_TARGET_APP_LOGIC, "Adopting gpu device settings written before there was a second miner as lolMiner's");
+        self.gpu_devices_settings_by_miner.0.insert(
+            GpuMinerType::LolMiner,
+            std::mem::take(&mut self.legacy_gpu_devices_settings),
+        );
+    }
+
+    /// Keeps the compatibility copy in step, so rolling back to a build that only knows the flat
+    /// shape still finds the user's lolMiner exclusions there.
+    fn refresh_legacy_gpu_devices_settings(&mut self) {
+        self.legacy_gpu_devices_settings = self
+            .gpu_devices_settings_by_miner
+            .for_miner(&GpuMinerType::LolMiner)
+            .cloned()
+            .unwrap_or_default();
+    }
+
+    fn update_gpu_devices_settings(
+        &mut self,
+        miner_type: GpuMinerType,
+        update: impl FnOnce(&mut GpuDevicesSettings),
+    ) -> &mut Self {
+        self.adopt_legacy_gpu_devices_settings();
+        update(self.gpu_devices_settings_by_miner.for_miner_mut(miner_type));
+        self.refresh_legacy_gpu_devices_settings();
+        self
+    }
+
     pub fn populate_gpu_devices_settings(
         &mut self,
         (miner_type, device_ids): (GpuMinerType, Vec<u32>),
     ) -> &mut Self {
-        let settings = self.gpu_devices_settings.for_miner_mut(miner_type);
-        for device_id in device_ids {
-            settings.add(device_id);
-        }
-
-        self
+        self.update_gpu_devices_settings(miner_type, |settings| {
+            for device_id in device_ids {
+                settings.add(device_id);
+            }
+        })
     }
 
     pub fn enable_gpu_device_exclusion(
         &mut self,
         (miner_type, device_id): (GpuMinerType, u32),
     ) -> &mut Self {
-        self.gpu_devices_settings
-            .for_miner_mut(miner_type)
-            .set_excluded(device_id, true);
-        self
+        self.update_gpu_devices_settings(miner_type, |settings| {
+            settings.set_excluded(device_id, true);
+        })
     }
 
     pub fn disable_gpu_device_exclusion(
         &mut self,
         (miner_type, device_id): (GpuMinerType, u32),
     ) -> &mut Self {
-        self.gpu_devices_settings
-            .for_miner_mut(miner_type)
-            .set_excluded(device_id, false);
-        self
+        self.update_gpu_devices_settings(miner_type, |settings| {
+            settings.set_excluded(device_id, false);
+        })
     }
 
     pub fn get_selected_cpu_usage_percentage(&self) -> u32 {
@@ -405,18 +485,25 @@ impl ConfigMiningContent {
     /// `MiningError::AllDevicesExcluded`, and the user cannot always reach that miner's device
     /// list to undo it. Deliberate partial exclusions are left alone.
     pub fn include_devices_of_unusable_miners(&mut self, (): ()) -> &mut Self {
-        for (miner_type, settings) in &mut self.gpu_devices_settings.0 {
+        self.adopt_legacy_gpu_devices_settings();
+        for (miner_type, settings) in &mut self.gpu_devices_settings_by_miner.0 {
             if settings.is_every_device_excluded() {
                 info!(target: LOG_TARGET_APP_LOGIC, "Re-including every {miner_type} device, all of them were excluded");
                 settings.include_every_device();
             }
         }
+        self.refresh_legacy_gpu_devices_settings();
         self
     }
 
     pub fn get_excluded_devices(&self, miner_type: &GpuMinerType) -> Vec<u32> {
-        self.gpu_devices_settings
+        self.gpu_devices_settings_by_miner
             .for_miner(miner_type)
+            .or_else(|| {
+                // Not migrated yet: a config from before per miner settings only holds lolMiner's.
+                matches!(miner_type, GpuMinerType::LolMiner)
+                    .then_some(&self.legacy_gpu_devices_settings)
+            })
             .map(GpuDevicesSettings::excluded_device_ids)
             .unwrap_or_default()
     }
@@ -733,10 +820,35 @@ mod tests {
         }
     }
 
+    /// The same guarantee as above, for the key this build actually writes. Both keys have to
+    /// degrade to a warning independently, or the rollback safety net becomes the thing that
+    /// wipes the config it was added to protect.
+    #[test]
+    fn an_unreadable_per_miner_device_settings_field_never_fails_the_mining_config() {
+        for stored in [
+            r#"{"LolMiner":{"0":{"device_id":0,"is_excluded":true}},"SomeFutureMiner":{}}"#,
+            "null",
+            "\"nonsense\"",
+            "[]",
+            r#"{"LolMiner":"nonsense"}"#,
+            r#"{"nonsense":{"also":"nonsense"}}"#,
+        ] {
+            let config = format!(
+                r#"{{"gpu_devices_settings_by_miner":{stored},"selected_mining_mode":"Ludicrous","mine_on_app_start":false}}"#
+            );
+
+            let content: ConfigMiningContent = serde_json::from_str(&config)
+                .unwrap_or_else(|e| panic!("{stored} must not fail the mining config: {e}"));
+
+            assert_eq!(content.selected_mining_mode(), "Ludicrous");
+            assert!(!content.mine_on_app_start());
+        }
+    }
+
     #[test]
     fn settings_for_miners_this_build_knows_survive_an_unknown_sibling() {
         let content: ConfigMiningContent = serde_json::from_str(
-            r#"{"gpu_devices_settings":{"LolMiner":{"0":{"device_id":0,"is_excluded":true}},"SomeFutureMiner":{"0":{"device_id":0,"is_excluded":true}}}}"#,
+            r#"{"gpu_devices_settings_by_miner":{"LolMiner":{"0":{"device_id":0,"is_excluded":true}},"SomeFutureMiner":{"0":{"device_id":0,"is_excluded":true}}}}"#,
         )
         .expect("valid mining config");
 
@@ -749,7 +861,7 @@ mod tests {
     #[test]
     fn one_unreadable_miner_entry_does_not_take_its_siblings_with_it() {
         let content: ConfigMiningContent = serde_json::from_str(
-            r#"{"gpu_devices_settings":{"LolMiner":{"0":{"device_id":0,"is_excluded":true}},"TariMiner":"nonsense"}}"#,
+            r#"{"gpu_devices_settings_by_miner":{"LolMiner":{"0":{"device_id":0,"is_excluded":true}},"TariMiner":"nonsense"}}"#,
         )
         .expect("valid mining config");
 

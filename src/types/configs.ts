@@ -53,7 +53,7 @@ export interface ConfigMining {
     selected_mining_mode: string;
     gpu_mining_enabled: boolean;
     mining_modes: Record<string, MiningMode>;
-    gpu_devices_settings: GpuDevicesSettingsByMiner;
+    gpu_devices_settings_by_miner: GpuDevicesSettingsByMiner;
     cpu_mining_enabled: boolean;
     is_gpu_mining_recommended: boolean;
     eco_alert_needed: boolean;

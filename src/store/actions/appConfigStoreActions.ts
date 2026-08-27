@@ -663,7 +663,7 @@ export const handleWalletUIChanged = (mode: WalletUIMode) => {
 };
 
 export const handleGpuDevicesSettingsUpdated = (gpuDevicesSettings: GpuDevicesSettingsByMiner) => {
-    useConfigMiningStore.setState((c) => ({ ...c, gpu_devices_settings: gpuDevicesSettings }));
+    useConfigMiningStore.setState((c) => ({ ...c, gpu_devices_settings_by_miner: gpuDevicesSettings }));
 };
 
 /// The devices on screen are the ones the currently selected miner detected, and device ids only
@@ -671,7 +671,7 @@ export const handleGpuDevicesSettingsUpdated = (gpuDevicesSettings: GpuDevicesSe
 export const getSelectedMinerDeviceSettings = (): Record<number, GpuDeviceSettings> => {
     const selectedMiner = useMiningStore.getState().selectedMiner;
     if (!selectedMiner) return {};
-    return useConfigMiningStore.getState().gpu_devices_settings[selectedMiner] ?? {};
+    return useConfigMiningStore.getState().gpu_devices_settings_by_miner[selectedMiner] ?? {};
 };
 
 export const toggleDeviceExclusion = async (deviceIndex: number, excluded: boolean) => {
@@ -692,7 +692,7 @@ export const toggleDeviceExclusion = async (deviceIndex: number, excluded: boole
         const updatedDevices = { ...devices, [deviceIndex]: { ...devices[deviceIndex], is_excluded: excluded } };
         useConfigMiningStore.setState((c) => ({
             ...c,
-            gpu_devices_settings: { ...c.gpu_devices_settings, [selectedMiner]: updatedDevices },
+            gpu_devices_settings_by_miner: { ...c.gpu_devices_settings_by_miner, [selectedMiner]: updatedDevices },
         }));
 
         const isAllExcluded = Object.values(updatedDevices).every((device) => device.is_excluded);

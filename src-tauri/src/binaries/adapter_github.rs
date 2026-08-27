@@ -38,9 +38,44 @@ use crate::{
 
 use super::binaries_resolver::{BinaryDownloadInfo, LatestVersionApiAdapter};
 
+/// Where a release publishes the checksum for an asset.
+pub enum ChecksumSource {
+    /// A `<asset>.sha256` sidecar next to the asset.
+    PerAssetSidecar,
+    /// One manifest for the whole release, listing `<hash>  <asset>` per line.
+    SharedManifest(&'static str),
+}
+
 pub struct GithubReleasesAdapter {
     pub repo: String,
     pub owner: String,
+    pub checksum_source: ChecksumSource,
+}
+
+/// Swaps the asset at the end of a release download url for another file in the same release.
+fn sibling_release_file(asset_url: &str, file_name: &str) -> String {
+    match asset_url.rsplit_once('/') {
+        Some((release_url, _)) => format!("{release_url}/{file_name}"),
+        None => file_name.to_string(),
+    }
+}
+
+/// Pulls the hash for `asset_name` out of a checksum file.
+/// Handles both the single line sidecar and a shared `<hash>  <asset>` manifest.
+fn parse_expected_checksum(contents: &str, asset_name: &str) -> Result<String, Error> {
+    let mut expected_hash = "";
+    let regex = Regex::new(&format!(r"([a-f0-9]+)\s.{asset_name}"))
+        .map_err(|e| anyhow!("Failed to create regex: {}", e))?;
+
+    for line in contents.lines() {
+        if let Some(caps) = regex.captures(line) {
+            expected_hash = caps
+                .get(1)
+                .map(|hash| hash.as_str())
+                .ok_or_else(|| anyhow!("Failed to extract hash from line: {}", line))?;
+        }
+    }
+    Ok(expected_hash.to_string())
 }
 
 #[async_trait]
@@ -55,26 +90,24 @@ impl LatestVersionApiAdapter for GithubReleasesAdapter {
         file_sha256.read_to_end(&mut buffer_sha256).await?;
         let contents =
             String::from_utf8(buffer_sha256).expect("Failed to read file contents as UTF-8");
-        let mut expected_hash = "";
-        let regex = Regex::new(&format!(r"([a-f0-9]+)\s.{asset_name}"))
-            .map_err(|e| anyhow!("Failed to create regex: {}", e))?;
 
-        for line in contents.lines() {
-            if let Some(caps) = regex.captures(line) {
-                expected_hash = caps
-                    .get(1)
-                    .map(|hash| hash.as_str())
-                    .ok_or_else(|| anyhow!("Failed to extract hash from line: {}", line))?;
-            }
-        }
-        Ok(expected_hash.to_string())
+        parse_expected_checksum(&contents, asset_name)
     }
     async fn download_and_get_checksum_path(
         &self,
         directory: PathBuf,
         download_info: BinaryDownloadInfo,
     ) -> Result<PathBuf, Error> {
-        let checksum_url = format!("{}.sha256", download_info.main_url);
+        let (checksum_url, checksum_fallback_url) = match self.checksum_source {
+            ChecksumSource::PerAssetSidecar => (
+                format!("{}.sha256", download_info.main_url),
+                format!("{}.sha256", download_info.fallback_url),
+            ),
+            ChecksumSource::SharedManifest(file_name) => (
+                sibling_release_file(&download_info.main_url, file_name),
+                sibling_release_file(&download_info.fallback_url, file_name),
+            ),
+        };
 
         match HttpFileClient::builder()
             .with_cloudflare_cache_check()
@@ -84,7 +117,6 @@ impl LatestVersionApiAdapter for GithubReleasesAdapter {
         {
             Ok(checksum_path) => Ok(checksum_path),
             Err(_) => {
-                let checksum_fallback_url = format!("{}.sha256", download_info.fallback_url);
                 info!(target: LOG_TARGET_APP_LOGIC, "Fallback URL: {checksum_fallback_url}");
                 HttpFileClient::builder()
                     .build(checksum_fallback_url.clone(), directory.clone())?
@@ -124,5 +156,62 @@ impl LatestVersionApiAdapter for GithubReleasesAdapter {
     fn get_base_fallback_download_url(&self, version: &str) -> String {
         let base_url = get_gh_download_url(&self.owner, &self.repo);
         format!("{base_url}/v{version}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The real manifest published with TARI.Miner v1.1.6.
+    const SHARED_MANIFEST: &str = "\
+b8a8839957b511582973438d8e9e4e52d4487f9ad30e2b1b462c71b8bbb21b12  TARI.Miner-v1.1.6-windows.zip
+89a41e00182be21cdb7b1eceebcf0d5f43a6bc6e5a277c608e6ca7834dd193f8  TARI.Miner-v1.1.6-linux.tar.gz
+9cac007c2c693f3007a251a1ac350a2831dcabc3b72bfd4c64361191e580dfbe  tari-miner-hiveos-1.1.6.tar.gz";
+
+    #[test]
+    fn the_hash_for_the_asset_we_downloaded_is_picked_out_of_a_shared_manifest() {
+        assert_eq!(
+            parse_expected_checksum(SHARED_MANIFEST, "TARI.Miner-v1.1.6-linux.tar.gz")
+                .expect("parsed manifest"),
+            "89a41e00182be21cdb7b1eceebcf0d5f43a6bc6e5a277c608e6ca7834dd193f8"
+        );
+        assert_eq!(
+            parse_expected_checksum(SHARED_MANIFEST, "TARI.Miner-v1.1.6-windows.zip")
+                .expect("parsed manifest"),
+            "b8a8839957b511582973438d8e9e4e52d4487f9ad30e2b1b462c71b8bbb21b12"
+        );
+    }
+
+    #[test]
+    fn an_asset_missing_from_the_manifest_yields_no_hash_rather_than_another_assets() {
+        assert_eq!(
+            parse_expected_checksum(SHARED_MANIFEST, "TARI.Miner-v9.9.9-linux.tar.gz")
+                .expect("parsed manifest"),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_single_line_sidecar_still_parses() {
+        assert_eq!(
+            parse_expected_checksum(
+                "89a41e00182be21cdb7b1eceebcf0d5f43a6bc6e5a277c608e6ca7834dd193f8  asset.zip",
+                "asset.zip"
+            )
+            .expect("parsed sidecar"),
+            "89a41e00182be21cdb7b1eceebcf0d5f43a6bc6e5a277c608e6ca7834dd193f8"
+        );
+    }
+
+    #[test]
+    fn the_manifest_is_looked_for_next_to_the_asset_in_the_same_release() {
+        assert_eq!(
+            sibling_release_file(
+                "https://cdn-universe.tari.com/tari-project/TARI.Miner/releases/download/v1.1.6/TARI.Miner-v1.1.6-linux.tar.gz",
+                "SHA256SUMS.txt"
+            ),
+            "https://cdn-universe.tari.com/tari-project/TARI.Miner/releases/download/v1.1.6/SHA256SUMS.txt"
+        );
     }
 }

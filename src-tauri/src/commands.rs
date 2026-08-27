@@ -1093,7 +1093,10 @@ pub async fn include_devices_of_unusable_gpu_miners() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     EventsEmitter::emit_update_gpu_devices_settings(
-        ConfigMining::content().await.gpu_devices_settings().clone(),
+        ConfigMining::content()
+            .await
+            .gpu_devices_settings_by_miner()
+            .clone(),
     )
     .await;
 
@@ -1475,13 +1478,6 @@ pub async fn stop_gpu_mining() -> Result<(), String> {
         warn!(target: LOG_TARGET_APP_LOGIC, "stop_cpu_mining took too long: {:?}", timer.elapsed());
     }
     Ok(())
-}
-
-/// Returns the GPU miner the user picked, so the frontend can render the picker before the
-/// backend pushes its first selected-miner event.
-#[tauri::command]
-pub async fn get_selected_gpu_miner() -> Result<GpuMinerType, String> {
-    Ok(ConfigMining::content().await.gpu_miner_type().clone())
 }
 
 #[tauri::command]

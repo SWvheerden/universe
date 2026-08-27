@@ -539,14 +539,23 @@ impl GpuManager {
                 .get_task_tracker()
                 .await
                 .spawn(async move {
-                    GpuManager::write().await.switch_miner(fallback_miner).await.unwrap_or_else(
-                        |e| {
-                            error!(target: LOG_TARGET_APP_LOGIC, "Failed to switch to fallback gpu miner: {e}");
-                        },
-                    );
-                    GpuManager::write().await.start_mining().await.unwrap_or_else(|e| {
+                    // One critical section for both halves: taking the lock twice lets a queued
+                    // stop_gpu_mining land in between, so the user's stop would be undone by the
+                    // start below.
+                    let mut manager = GpuManager::write().await;
+
+                    // The switch fails when the fallback cannot be used either, and the adapter is
+                    // then still the miner we just marked unhealthy. Starting anyway would restart
+                    // exactly that miner, and the fallback latch is already set, so nothing would
+                    // ever get it out of that loop.
+                    if let Err(e) = manager.switch_miner(fallback_miner).await {
+                        error!(target: LOG_TARGET_APP_LOGIC, "Failed to switch to fallback gpu miner, leaving mining stopped: {e}");
+                        return;
+                    }
+
+                    if let Err(e) = manager.start_mining().await {
                         error!(target: LOG_TARGET_APP_LOGIC, "Failed to start mining with fallback gpu miner: {e}");
-                    });
+                    }
                 });
         } else {
             error!(target: LOG_TARGET_APP_LOGIC, "No healthy gpu miners left to switch to");

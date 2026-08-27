@@ -42,6 +42,7 @@ use crate::{
 };
 use anyhow::Error;
 use log::{error, info};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tari_shutdown::ShutdownSignal;
 use tauri::AppHandle;
 use tokio::sync::{
@@ -131,6 +132,7 @@ impl SetupPhaseImpl for GpuMiningSetupPhase {
     ) -> ProgressStepper {
         ProgressStepperBuilder::new()
             .add_incremental_step(SetupStep::BinariesGpuMiner, true)
+            .add_incremental_step(SetupStep::BinariesTariMiner, true)
             .add_step(SetupStep::DetectGpu, true)
             .add_step(SetupStep::InitializeGpuHardware, false)
             .build(
@@ -173,13 +175,18 @@ impl SetupPhaseImpl for GpuMiningSetupPhase {
         let lolminer_binary_progress_tracker =
             progress_stepper.track_step_incrementally(SetupStep::BinariesGpuMiner);
 
+        // Each miner needs its own step: an incremental tracker is handed out once per step, so a
+        // second miner sharing this one would download with no tracker at all. That is not only a
+        // frozen progress bar - the tracker is also what feeds the phase's timeout watcher, so the
+        // second download would have to finish within the phase budget of the first one's last
+        // heartbeat or the whole phase is marked failed.
         let tariminer_binary_progress_tracker =
-            progress_stepper.track_step_incrementally(SetupStep::BinariesGpuMiner);
+            progress_stepper.track_step_incrementally(SetupStep::BinariesTariMiner);
+
+        let is_any_miner_succeeded = AtomicBool::new(false);
 
         progress_stepper
             .complete_step(SetupStep::BinariesGpuMiner, || async {
-                let mut is_any_miner_succeeded = false;
-
                 // LolMiner is supported on Windows | Linux
                 if GpuMinerType::LolMiner.is_supported_on_current_platform() {
                     let lolminer_initialization_result = binary_resolver
@@ -189,7 +196,7 @@ impl SetupPhaseImpl for GpuMiningSetupPhase {
                     let lolminer_err = lolminer_initialization_result.as_ref().err();
 
                     if lolminer_initialization_result.is_ok() {
-                        is_any_miner_succeeded = true;
+                        is_any_miner_succeeded.store(true, Ordering::Relaxed);
                     }else {
                         error!(target: LOG_TARGET_APP_LOGIC, "LolMiner initialization error: {:?}", lolminer_err);
                     }
@@ -204,6 +211,12 @@ impl SetupPhaseImpl for GpuMiningSetupPhase {
                         .await;
                 }
 
+                Ok(())
+            })
+            .await?;
+
+        progress_stepper
+            .complete_step(SetupStep::BinariesTariMiner, || async {
                 // TARI.Miner is supported on Windows | Linux
                 if GpuMinerType::TariMiner.is_supported_on_current_platform() {
                     let tariminer_initialization_result = binary_resolver
@@ -213,7 +226,7 @@ impl SetupPhaseImpl for GpuMiningSetupPhase {
                     let tariminer_err = tariminer_initialization_result.as_ref().err();
 
                     if tariminer_initialization_result.is_ok() {
-                        is_any_miner_succeeded = true;
+                        is_any_miner_succeeded.store(true, Ordering::Relaxed);
                     } else {
                         error!(target: LOG_TARGET_APP_LOGIC, "TARI.Miner initialization error: {:?}", tariminer_err);
                     }
@@ -228,15 +241,15 @@ impl SetupPhaseImpl for GpuMiningSetupPhase {
                         .await;
                 }
 
-                if !is_any_miner_succeeded {
-                    return Err(anyhow::anyhow!(
-                        "Failed to initialize GPU miner binaries: LolMiner, TARI.Miner"
-                    ));
-                }
-
                 Ok(())
             })
             .await?;
+
+        if !is_any_miner_succeeded.load(Ordering::Relaxed) {
+            return Err(anyhow::anyhow!(
+                "Failed to initialize GPU miner binaries: LolMiner, TARI.Miner"
+            ));
+        }
 
         progress_stepper
             .complete_step(SetupStep::DetectGpu, || async {

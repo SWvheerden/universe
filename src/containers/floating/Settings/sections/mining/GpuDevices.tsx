@@ -24,7 +24,7 @@ import { GpuMinerFeature } from '@app/types/events-payloads.ts';
 const GpuDevices = memo(function GpuDevices() {
     const { t } = useTranslation(['common', 'settings'], { useSuspense: false });
     const gpuDevices = useMiningMetricsStore((s) => s.gpu_devices);
-    const gpuDevicesSettingsByMiner = useConfigMiningStore((s) => s.gpu_devices_settings);
+    const gpuDevicesSettingsByMiner = useConfigMiningStore((s) => s.gpu_devices_settings_by_miner);
     const isGPUMining = useMiningMetricsStore((s) => s.gpu_mining_status.is_mining);
     const gpuMiningModuleInitialized = useSetupStore(setupStoreSelectors.isGpuMiningModuleInitialized);
 

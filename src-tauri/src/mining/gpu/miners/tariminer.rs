@@ -20,6 +20,7 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
@@ -94,6 +95,10 @@ const MAX_BARREN_RESTARTS: u32 = 3;
 const UNHEALTHY_FALLBACK_AFTER: Duration = Duration::from_secs(3 * 60);
 /// Sub folder of the extracted release archive that holds the per architecture backends.
 const BACKENDS_FOLDER: &str = "bin";
+/// How long `nvidia-smi` gets to enumerate the GPUs before we give up on it.
+/// Device detection runs inside the GPU setup phase with the `GpuManager` write lock held, so a
+/// wedged NVIDIA driver hanging here would park every other caller of that lock for the session.
+const DEVICE_DETECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The CUDA backend that TARI.Miner ships one binary for per supported compute capability.
 /// The upstream starter script picks the backend the same way, from `nvidia-smi --query-gpu=compute_cap`.
@@ -414,7 +419,14 @@ impl GpuMinerInterfaceTrait for TariMinerGpuMiner {
                 anyhow::anyhow!("Could not run nvidia-smi to enumerate NVIDIA GPUs: {e}")
             })?;
 
-        let output = result.wait_with_output().await?;
+        let output = tokio::time::timeout(DEVICE_DETECTION_TIMEOUT, result.wait_with_output())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "nvidia-smi did not respond within {}s",
+                    DEVICE_DETECTION_TIMEOUT.as_secs()
+                )
+            })??;
         if !output.status.success() {
             return Err(anyhow::anyhow!(
                 "nvidia-smi could not enumerate NVIDIA GPUs: {}",
@@ -455,7 +467,10 @@ impl GpuMinerInterfaceTrait for TariMinerGpuMiner {
         .await?;
 
         EventsEmitter::emit_update_gpu_devices_settings(
-            ConfigMining::content().await.gpu_devices_settings().clone(),
+            ConfigMining::content()
+                .await
+                .gpu_devices_settings_by_miner()
+                .clone(),
         )
         .await;
 
@@ -537,6 +552,12 @@ impl ProcessAdapter for TariMinerGpuMiner {
             binary_version_path.clone(),
         )?;
 
+        // `--device` is passed straight to `cudaSetDevice`, so it is a CUDA ordinal, while the id
+        // we detected is the nvidia-smi index. CUDA orders by speed unless told otherwise, so on a
+        // mixed rig the two disagree and we would mine on a card the user excluded, with the wrong
+        // architecture's backend. nvidia-smi indexes by PCI bus id, so ask CUDA for the same order.
+        let envs = HashMap::from([("CUDA_DEVICE_ORDER".to_string(), "PCI_BUS_ID".to_string())]);
+
         let speed_tracker = TariMinerSpeedTracker::default();
         let output_sink = {
             let speed_tracker = speed_tracker.clone();
@@ -548,7 +569,7 @@ impl ProcessAdapter for TariMinerGpuMiner {
                 shutdown: inner_shutdown.clone(),
                 startup_spec: ProcessStartupSpec {
                     file_path: binary_version_path,
-                    envs: None,
+                    envs: Some(envs),
                     args,
                     data_dir: base_folder,
                     pid_file_name: self.pid_file_name().to_string(),

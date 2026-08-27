@@ -65,12 +65,14 @@ export function GpuMinerSelect({ miners, selectedMiner, onChange, disabled }: Pr
     const click = useClick(context, { enabled: !disabled });
     const dismiss = useDismiss(context);
     const role = useRole(context, { role: 'listbox' });
+    // Not virtual: without real DOM focus on the items, useListNavigation moves the highlight but
+    // leaves focus on whichever item was focused first, and the item's own key handler is the only
+    // thing that selects - so Enter would pick the highlighted-from miner, not the highlighted one.
     const listNavigation = useListNavigation(context, {
         listRef,
         activeIndex,
         onNavigate: setActiveIndex,
-        virtual: true,
-        loop: false,
+        loop: true,
     });
 
     const { getReferenceProps, getFloatingProps, getItemProps } = useInteractions([
