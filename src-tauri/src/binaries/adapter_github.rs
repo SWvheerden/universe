@@ -76,7 +76,8 @@ fn parse_expected_checksum(contents: &str, asset_name: &str) -> Result<String, E
 
     contents
         .lines()
-        // `lines` keeps the carriage return of a CRLF file, which the end anchor would reject.
+        // `lines` already strips a CRLF pair. This is for the stragglers the end anchor would
+        // otherwise reject: a lone carriage return, or trailing spaces.
         .map(str::trim)
         .find_map(|line| regex.captures(line))
         .and_then(|caps| caps.get(1).map(|hash| hash.as_str().to_string()))
@@ -222,15 +223,21 @@ b8a8839957b511582973438d8e9e4e52d4487f9ad30e2b1b462c71b8bbb21b12  TARI.Miner-v1.
         assert!(parse_expected_checksum(manifest, "TARI.Miner-v1.1.6-linux.tar.gz").is_err());
     }
 
+    /// `lines` handles a CRLF pair on its own; a lone carriage return or a trailing space is what
+    /// would actually reach the end anchor.
     #[test]
-    fn a_crlf_checksum_file_still_parses() {
-        let manifest =
-            "89a41e00182be21cdb7b1eceebcf0d5f43a6bc6e5a277c608e6ca7834dd193f8  asset.zip\r\n";
-
-        assert_eq!(
-            parse_expected_checksum(manifest, "asset.zip").expect("parsed manifest"),
-            "89a41e00182be21cdb7b1eceebcf0d5f43a6bc6e5a277c608e6ca7834dd193f8"
-        );
+    fn trailing_whitespace_does_not_hide_an_entry_from_the_end_anchor() {
+        for manifest in [
+            "89a41e00182be21cdb7b1eceebcf0d5f43a6bc6e5a277c608e6ca7834dd193f8  asset.zip\r",
+            "89a41e00182be21cdb7b1eceebcf0d5f43a6bc6e5a277c608e6ca7834dd193f8  asset.zip  ",
+            "89a41e00182be21cdb7b1eceebcf0d5f43a6bc6e5a277c608e6ca7834dd193f8  asset.zip\r\n",
+        ] {
+            assert_eq!(
+                parse_expected_checksum(manifest, "asset.zip").expect("parsed manifest"),
+                "89a41e00182be21cdb7b1eceebcf0d5f43a6bc6e5a277c608e6ca7834dd193f8",
+                "{manifest:?} should still match"
+            );
+        }
     }
 
     #[test]
