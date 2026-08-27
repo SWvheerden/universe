@@ -241,15 +241,18 @@ impl SetupPhaseImpl for GpuMiningSetupPhase {
                         .await;
                 }
 
+                // Checked from inside a required step so the failure is routed through
+                // handle_step_error, which is what sends PhaseStatus::Failed with the reason.
+                // Returning it from setup_inner instead leaves the phase reporting nothing at all.
+                if !is_any_miner_succeeded.load(Ordering::Relaxed) {
+                    return Err(anyhow::anyhow!(
+                        "Failed to initialize GPU miner binaries: LolMiner, TARI.Miner"
+                    ));
+                }
+
                 Ok(())
             })
             .await?;
-
-        if !is_any_miner_succeeded.load(Ordering::Relaxed) {
-            return Err(anyhow::anyhow!(
-                "Failed to initialize GPU miner binaries: LolMiner, TARI.Miner"
-            ));
-        }
 
         progress_stepper
             .complete_step(SetupStep::DetectGpu, || async {
