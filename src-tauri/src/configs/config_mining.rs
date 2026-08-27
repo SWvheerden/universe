@@ -26,7 +26,7 @@ use crate::events_emitter::EventsEmitter;
 use crate::mining::gpu::consts::GpuMinerType;
 use getset::{Getters, Setters};
 use log::{info, warn};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::time::Duration;
 use std::{collections::HashMap, fmt::Display, sync::LazyLock, time::SystemTime};
 use tauri::AppHandle;
@@ -108,10 +108,6 @@ impl GpuDevicesSettings {
         if let Some(settings) = self.0.get_mut(&device_id) {
             settings.is_excluded = is_excluded;
         }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
     }
 
     fn is_every_device_excluded(&self) -> bool {
@@ -262,20 +258,20 @@ pub struct ConfigMiningContent {
     cpu_mining_enabled: bool,
     #[serde(default)]
     gpu_devices_settings_by_miner: GpuDevicesSettingsByMiner,
-    /// Compatibility copy of lolMiner's device settings, under the name and the flat shape that
-    /// builds from before per miner settings expect.
+    /// Compatibility copy of the device settings, under the name older builds expect.
     ///
-    /// Those builds declare this field as `HashMap<u32, GpuDeviceSettings>`, and a present field
-    /// they cannot parse is a hard error there, which costs the user their whole mining config.
-    /// Keeping the old shape under the old name means a user who tries a pre-release and rolls
-    /// back keeps everything, lolMiner's exclusions included. Read only to migrate a config
-    /// written by such a build; `gpu_devices_settings_by_miner` is authoritative otherwise.
+    /// Written as lolMiner's settings in the flat `device id -> settings` shape, because builds
+    /// from before per miner settings declare this field as `HashMap<u32, GpuDeviceSettings>` and
+    /// a present field they cannot parse is a hard error there, costing the user their whole
+    /// mining config. Read back tolerantly in every shape this name has ever held - flat, and the
+    /// per miner map that intermediate builds wrote here - so upgrading from any of them keeps the
+    /// user's exclusions. `gpu_devices_settings_by_miner` is authoritative once migrated.
     #[serde(
         rename = "gpu_devices_settings",
         default,
-        deserialize_with = "deserialize_legacy_gpu_devices_settings"
+        serialize_with = "serialize_gpu_devices_settings_for_older_builds"
     )]
-    legacy_gpu_devices_settings: GpuDevicesSettings,
+    legacy_gpu_devices_settings: GpuDevicesSettingsByMiner,
     #[serde(default, deserialize_with = "deserialize_gpu_miner_type")]
     gpu_miner_type: GpuMinerType,
     squad_override: Option<String>,
@@ -335,7 +331,7 @@ impl Default for ConfigMiningContent {
             gpu_mining_enabled: true,
             cpu_mining_enabled: true,
             gpu_devices_settings_by_miner: GpuDevicesSettingsByMiner::default(),
-            legacy_gpu_devices_settings: GpuDevicesSettings::default(),
+            legacy_gpu_devices_settings: GpuDevicesSettingsByMiner::default(),
             gpu_miner_type: GpuMinerType::default(),
             pause_on_battery_mode: PauseOnBatteryModeState::Enabled,
             squad_override: None,
@@ -346,17 +342,20 @@ impl Default for ConfigMiningContent {
         }
     }
 }
-/// Tolerant deserializer for the legacy flat device settings.
-/// Anything that is not the flat shape - including the per miner map that intermediate builds
-/// briefly wrote under this name - is dropped rather than failing the whole config.
-fn deserialize_legacy_gpu_devices_settings<'de, D>(
-    deserializer: D,
-) -> Result<GpuDevicesSettings, D::Error>
+/// Writes the compatibility copy in the flat shape older builds can read, which can only carry one
+/// miner's settings - lolMiner's, the only one those builds know about.
+fn serialize_gpu_devices_settings_for_older_builds<S>(
+    settings: &GpuDevicesSettingsByMiner,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
-    D: Deserializer<'de>,
+    S: Serializer,
 {
-    let stored = serde_json::Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value::<GpuDevicesSettings>(stored).unwrap_or_default())
+    settings
+        .for_miner(&GpuMinerType::LolMiner)
+        .cloned()
+        .unwrap_or_default()
+        .serialize(serializer)
 }
 
 /// Tolerant deserializer for the selected GPU miner.
@@ -411,21 +410,14 @@ impl ConfigMiningContent {
             return;
         }
 
-        info!(target: LOG_TARGET_APP_LOGIC, "Adopting gpu device settings written before there was a second miner as lolMiner's");
-        self.gpu_devices_settings_by_miner.0.insert(
-            GpuMinerType::LolMiner,
-            std::mem::take(&mut self.legacy_gpu_devices_settings),
-        );
+        info!(target: LOG_TARGET_APP_LOGIC, "Adopting the gpu device settings stored under the compatibility key");
+        self.gpu_devices_settings_by_miner = std::mem::take(&mut self.legacy_gpu_devices_settings);
     }
 
     /// Keeps the compatibility copy in step, so rolling back to a build that only knows the flat
     /// shape still finds the user's lolMiner exclusions there.
     fn refresh_legacy_gpu_devices_settings(&mut self) {
-        self.legacy_gpu_devices_settings = self
-            .gpu_devices_settings_by_miner
-            .for_miner(&GpuMinerType::LolMiner)
-            .cloned()
-            .unwrap_or_default();
+        self.legacy_gpu_devices_settings = self.gpu_devices_settings_by_miner.clone();
     }
 
     fn update_gpu_devices_settings(
@@ -499,11 +491,8 @@ impl ConfigMiningContent {
     pub fn get_excluded_devices(&self, miner_type: &GpuMinerType) -> Vec<u32> {
         self.gpu_devices_settings_by_miner
             .for_miner(miner_type)
-            .or_else(|| {
-                // Not migrated yet: a config from before per miner settings only holds lolMiner's.
-                matches!(miner_type, GpuMinerType::LolMiner)
-                    .then_some(&self.legacy_gpu_devices_settings)
-            })
+            // Not migrated yet: read straight from the compatibility copy.
+            .or_else(|| self.legacy_gpu_devices_settings.for_miner(miner_type))
             .map(GpuDevicesSettings::excluded_device_ids)
             .unwrap_or_default()
     }
@@ -920,6 +909,64 @@ mod tests {
         assert_eq!(
             content.get_excluded_devices(&GpuMinerType::LolMiner),
             vec![1]
+        );
+    }
+
+    /// The per miner map lived under the old `gpu_devices_settings` name in intermediate builds,
+    /// so a pre-release tester's config can hold that shape under that key. Dropping it would lose
+    /// both miners' settings on the very upgrade the compatibility key exists to protect.
+    #[test]
+    fn per_miner_settings_written_under_the_compatibility_key_are_adopted() {
+        let mut content: ConfigMiningContent = serde_json::from_str(
+            r#"{"gpu_devices_settings":{"LolMiner":{"0":{"device_id":0,"is_excluded":true}},"TariMiner":{"1":{"device_id":1,"is_excluded":true}}}}"#,
+        )
+        .expect("valid mining config");
+
+        assert_eq!(
+            content.get_excluded_devices(&GpuMinerType::LolMiner),
+            vec![0]
+        );
+        assert_eq!(
+            content.get_excluded_devices(&GpuMinerType::TariMiner),
+            vec![1]
+        );
+
+        // ...and they survive the migration onto the authoritative key.
+        content.populate_gpu_devices_settings((GpuMinerType::LolMiner, vec![0]));
+
+        assert_eq!(
+            content.get_excluded_devices(&GpuMinerType::LolMiner),
+            vec![0]
+        );
+        assert_eq!(
+            content.get_excluded_devices(&GpuMinerType::TariMiner),
+            vec![1]
+        );
+    }
+
+    /// A build from before per miner settings declares this key as a flat `HashMap<u32, _>`, and a
+    /// present field it cannot parse fails its whole mining config.
+    #[test]
+    fn the_compatibility_key_is_written_in_the_shape_older_builds_can_read() {
+        let mut content = ConfigMiningContent::default();
+        content.populate_gpu_devices_settings((GpuMinerType::LolMiner, vec![0, 1]));
+        content.enable_gpu_device_exclusion((GpuMinerType::LolMiner, 1));
+        content.populate_gpu_devices_settings((GpuMinerType::TariMiner, vec![0]));
+
+        let serialized = serde_json::to_value(&content).expect("serializable mining config");
+        let compatibility_key = serialized
+            .get("gpu_devices_settings")
+            .expect("the compatibility key is always written");
+
+        let as_an_older_build_would_read_it: HashMap<u32, GpuDeviceSettings> =
+            serde_json::from_value(compatibility_key.clone())
+                .expect("an older build must still be able to parse this");
+
+        assert_eq!(as_an_older_build_would_read_it.len(), 2);
+        assert!(
+            as_an_older_build_would_read_it
+                .get(&1)
+                .is_some_and(|settings| settings.is_excluded)
         );
     }
 

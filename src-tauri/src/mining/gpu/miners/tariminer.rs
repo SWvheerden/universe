@@ -556,6 +556,8 @@ impl ProcessAdapter for TariMinerGpuMiner {
         // we detected is the nvidia-smi index. CUDA orders by speed unless told otherwise, so on a
         // mixed rig the two disagree and we would mine on a card the user excluded, with the wrong
         // architecture's backend. nvidia-smi indexes by PCI bus id, so ask CUDA for the same order.
+        // This pins the ordering, it cannot recover an index: a CUDA_VISIBLE_DEVICES already set in
+        // the user's environment hides devices from the child, and the two would disagree again.
         let envs = HashMap::from([("CUDA_DEVICE_ORDER".to_string(), "PCI_BUS_ID".to_string())]);
 
         let speed_tracker = TariMinerSpeedTracker::default();
