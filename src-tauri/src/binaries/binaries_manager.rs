@@ -201,7 +201,12 @@ impl BinaryManager {
         let expected_checksum = self
             .adapter
             .get_expected_checksum(checksum_file.clone(), &download_info.name)
-            .await?;
+            .await
+            .inspect_err(|_| {
+                // Same cleanup as the mismatch branch below: leaving the half downloaded archive
+                // behind would have the next run treat it as already present.
+                std::fs::remove_dir_all(destination_dir.clone()).ok();
+            })?;
 
         info!(target: LOG_TARGET_APP_LOGIC, "In-progress file zip path: {in_progress_file_zip:?}");
 
